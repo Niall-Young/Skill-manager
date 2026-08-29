@@ -40,7 +40,7 @@ export interface AgentsRegistry {
   agent: Record<string, AgentConfig>;
 }
 
-export type PlanActionKind = "create" | "keep" | "remove" | "conflict";
+export type PlanActionKind = "create" | "keep" | "retarget" | "remove" | "conflict";
 
 export interface PlanAction {
   action: PlanActionKind;
@@ -48,6 +48,7 @@ export interface PlanAction {
   skill: string;
   linkPath: string;
   targetPath: string;
+  previousTargetPath?: string;
   reason?: string;
 }
 

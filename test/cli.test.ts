@@ -109,6 +109,101 @@ approved = false
   await assert.rejects(readlink(path.join(sandbox, ".gemini", "skills", "expert")));
 });
 
+test("sync retargets only a previously managed link whose recorded target still matches", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-retarget-"));
+  const library = path.join(sandbox, "MySkills");
+  const quiet = { cwd: sandbox, home: sandbox, stdout: () => undefined, stderr: () => undefined };
+  await runCli(["library", "init", library], quiet);
+  const oldTarget = path.join(library, "owned", "expert");
+  const newTarget = path.join(library, "owned", "expert-next");
+  for (const target of [oldTarget, newTarget]) {
+    await mkdir(target, { recursive: true });
+    await writeFile(path.join(target, "SKILL.md"), "---\nname: expert\ndescription: Expert.\n---\n");
+  }
+  await mkdir(path.join(sandbox, ".config", "skillmanager"), { recursive: true });
+  await writeFile(
+    path.join(sandbox, ".config", "skillmanager", "agents.toml"),
+    `version = 1\n[agent.codex]\nskills_dir = "${path.join(sandbox, ".codex", "skills")}"\napproved = true\n`,
+  );
+  await writeFile(
+    path.join(library, "skills.toml"),
+    `version = 1\n[source.own]\nkind = "owned"\npath = "owned"\n[skill.expert]\nfrom = "own"\npath = "expert"\nagents = ["codex"]\n`,
+  );
+  await runCli(["sync", "--library", library, "--apply", "--json"], quiet);
+  const linkPath = path.join(sandbox, ".codex", "skills", "expert");
+  assert.equal(await readlink(linkPath), oldTarget);
+
+  await writeFile(
+    path.join(library, "skills.toml"),
+    `version = 1\n[source.own]\nkind = "owned"\npath = "owned"\n[skill.expert]\nfrom = "own"\npath = "expert-next"\nagents = ["codex"]\n`,
+  );
+  const planOutput: string[] = [];
+  assert.equal(
+    await runCli(["plan", "--library", library, "--json"], { ...quiet, stdout: (line) => planOutput.push(line) }),
+    0,
+  );
+  assert.deepEqual(JSON.parse(planOutput.join("\n")).actions[0], {
+    action: "retarget",
+    agent: "codex",
+    skill: "expert",
+    linkPath,
+    targetPath: newTarget,
+    previousTargetPath: oldTarget,
+  });
+
+  const syncOutput: string[] = [];
+  assert.equal(
+    await runCli(["sync", "--library", library, "--apply", "--json"], {
+      ...quiet,
+      stdout: (line) => syncOutput.push(line),
+    }),
+    0,
+  );
+  assert.equal(await readlink(linkPath), newTarget);
+  assert.equal(JSON.parse(syncOutput.join("\n")).summary.retargeted, 1);
+});
+
+test("sync never retargets a recorded link whose old target is outside SkillLibrary", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-external-retarget-"));
+  const library = path.join(sandbox, "MySkills");
+  const quiet = { cwd: sandbox, home: sandbox, stdout: () => undefined, stderr: () => undefined };
+  await runCli(["library", "init", library], quiet);
+  const desiredTarget = path.join(library, "owned", "expert");
+  const externalTarget = path.join(sandbox, "external", "expert");
+  for (const target of [desiredTarget, externalTarget]) {
+    await mkdir(target, { recursive: true });
+    await writeFile(path.join(target, "SKILL.md"), "---\nname: expert\ndescription: Expert.\n---\n");
+  }
+  const linkPath = path.join(sandbox, ".codex", "skills", "expert");
+  await mkdir(path.dirname(linkPath), { recursive: true });
+  await (await import("node:fs/promises")).symlink(externalTarget, linkPath, "dir");
+  await mkdir(path.join(sandbox, ".config", "skillmanager"), { recursive: true });
+  await writeFile(
+    path.join(sandbox, ".config", "skillmanager", "agents.toml"),
+    `version = 1\n[agent.codex]\nskills_dir = "${path.join(sandbox, ".codex", "skills")}"\napproved = true\n`,
+  );
+  await writeFile(
+    path.join(library, "skills.toml"),
+    `version = 1\n[source.own]\nkind = "owned"\npath = "owned"\n[skill.expert]\nfrom = "own"\npath = "expert"\nagents = ["codex"]\n`,
+  );
+  await mkdir(path.join(library, ".skillmanager"), { recursive: true });
+  await writeFile(
+    path.join(library, ".skillmanager", "managed-links.json"),
+    JSON.stringify({
+      version: 1,
+      links: [{ agent: "codex", skill: "expert", linkPath, targetPath: externalTarget }],
+    }),
+  );
+
+  const output: string[] = [];
+  assert.equal(
+    await runCli(["plan", "--library", library, "--json"], { ...quiet, stdout: (line) => output.push(line) }),
+    0,
+  );
+  assert.equal(JSON.parse(output.join("\n")).actions[0].action, "conflict");
+  assert.equal(await readlink(linkPath), externalTarget);
+});
+
 test("inventory keeps Codex system and plugin skills outside the managed library", async () => {
   const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-inventory-"));
   const library = path.join(sandbox, "MySkills");

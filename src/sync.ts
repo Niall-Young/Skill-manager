@@ -18,6 +18,11 @@ interface ManagedState {
 
 const EMPTY_STATE: ManagedState = { version: 1, links: [] };
 
+function isInside(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 async function readManagedState(library: string): Promise<ManagedState> {
   try {
     return JSON.parse(await readFile(path.join(library, ".skillmanager", "managed-links.json"), "utf8"));
@@ -31,6 +36,8 @@ async function inspectDesiredLink(
   skill: string,
   linkPath: string,
   targetPath: string,
+  library: string,
+  managed?: ManagedLink,
 ): Promise<PlanAction> {
   const stat = await lstat(linkPath).catch(() => undefined);
   if (!stat) return { action: "create", agent, skill, linkPath, targetPath };
@@ -39,6 +46,22 @@ async function inspectDesiredLink(
   }
   const existing = path.resolve(path.dirname(linkPath), await readlink(linkPath));
   if (existing === targetPath) return { action: "keep", agent, skill, linkPath, targetPath };
+  if (
+    managed
+    && managed.agent === agent
+    && managed.skill === skill
+    && path.resolve(managed.targetPath) === existing
+    && isInside(library, existing)
+  ) {
+    return {
+      action: "retarget",
+      agent,
+      skill,
+      linkPath,
+      targetPath,
+      previousTargetPath: existing,
+    };
+  }
   return { action: "conflict", agent, skill, linkPath, targetPath, reason: `目标指向其他位置：${existing}` };
 }
 
@@ -50,6 +73,8 @@ export async function buildSyncPlan(
   const actions: PlanAction[] = [];
   const diagnostics: string[] = [];
   const desired = new Set<string>();
+  const state = await readManagedState(library);
+  const managedByPath = new Map(state.links.map((link) => [link.linkPath, link]));
 
   for (const [skillName, skill] of Object.entries(registry.skill)) {
     const source = registry.source[skill.from];
@@ -99,11 +124,17 @@ export async function buildSyncPlan(
       }
       const linkPath = path.join(agent.skills_dir, skillName);
       desired.add(linkPath);
-      actions.push(await inspectDesiredLink(agentName, skillName, linkPath, targetPath));
+      actions.push(await inspectDesiredLink(
+        agentName,
+        skillName,
+        linkPath,
+        targetPath,
+        library,
+        managedByPath.get(linkPath),
+      ));
     }
   }
 
-  const state = await readManagedState(library);
   for (const managed of state.links) {
     if (desired.has(managed.linkPath)) continue;
     const stat = await lstat(managed.linkPath).catch(() => undefined);
@@ -121,7 +152,13 @@ export async function buildSyncPlan(
   return { library, actions, diagnostics };
 }
 
-export async function applySyncPlan(plan: SyncPlan): Promise<{ transactionId: string; created: number; removed: number; kept: number }> {
+export async function applySyncPlan(plan: SyncPlan): Promise<{
+  transactionId: string;
+  created: number;
+  retargeted: number;
+  removed: number;
+  kept: number;
+}> {
   const conflicts = plan.actions.filter((item) => item.action === "conflict");
   if (conflicts.length) throw new Error(`同步计划包含 ${conflicts.length} 个冲突，未执行`);
 
@@ -133,6 +170,23 @@ export async function applySyncPlan(plan: SyncPlan): Promise<{ transactionId: st
         await mkdir(path.dirname(action.linkPath), { recursive: true });
         await symlink(action.targetPath, action.linkPath, "dir");
         applied.push(action);
+      } else if (action.action === "retarget") {
+        if (!action.previousTargetPath) throw new Error(`retarget 缺少原目标：${action.linkPath}`);
+        const stat = await lstat(action.linkPath).catch(() => undefined);
+        const current = stat?.isSymbolicLink()
+          ? path.resolve(path.dirname(action.linkPath), await readlink(action.linkPath))
+          : undefined;
+        if (current !== path.resolve(action.previousTargetPath)) {
+          throw new Error(`受管链接已变化，未改指向：${action.linkPath}`);
+        }
+        await unlink(action.linkPath);
+        try {
+          await symlink(action.targetPath, action.linkPath, "dir");
+        } catch (error) {
+          await symlink(action.previousTargetPath, action.linkPath, "dir").catch(() => undefined);
+          throw error;
+        }
+        applied.push(action);
       } else if (action.action === "remove") {
         await unlink(action.linkPath);
         applied.push(action);
@@ -141,13 +195,17 @@ export async function applySyncPlan(plan: SyncPlan): Promise<{ transactionId: st
   } catch (error) {
     for (const action of applied.reverse()) {
       if (action.action === "create") await unlink(action.linkPath).catch(() => undefined);
+      if (action.action === "retarget" && action.previousTargetPath) {
+        await unlink(action.linkPath).catch(() => undefined);
+        await symlink(action.previousTargetPath, action.linkPath, "dir").catch(() => undefined);
+      }
       if (action.action === "remove") await symlink(action.targetPath, action.linkPath, "dir").catch(() => undefined);
     }
     throw error;
   }
 
   const links: ManagedLink[] = plan.actions
-    .filter((item) => item.action === "create" || item.action === "keep")
+    .filter((item) => item.action === "create" || item.action === "keep" || item.action === "retarget")
     .map(({ agent, skill, linkPath, targetPath }) => ({ agent, skill, linkPath, targetPath }));
   const state: ManagedState = { version: 1, links };
   await mkdir(path.join(plan.library, ".skillmanager", "transactions"), { recursive: true });
@@ -163,6 +221,7 @@ export async function applySyncPlan(plan: SyncPlan): Promise<{ transactionId: st
   return {
     transactionId,
     created: plan.actions.filter((item) => item.action === "create").length,
+    retargeted: plan.actions.filter((item) => item.action === "retarget").length,
     removed: plan.actions.filter((item) => item.action === "remove").length,
     kept: plan.actions.filter((item) => item.action === "keep").length,
   };

@@ -32,7 +32,7 @@ SkillManager 把 Skill 的“原件”和 Agent 的“使用入口”分开：�
 - 从本地或远程 Git 仓库检出第三方 Skill，并在 `skills.lock` 中固定 commit。
 - 识别 Codex System 与当前启用 Plugin 的 Skill，只读展示、不迁移。
 - 自动识别 `.agents` 安装器和 Aily Runtime 的外部 Skill；项目链接可显式登记为外部所有。
-- 以事务方式创建和移除逐 Skill 链接；真实目录、未知链接和整目录别名会成为冲突。
+- 以事务方式创建、改指向和移除逐 Skill 链接；只有旧目标仍与受管记录一致且位于 SkillLibrary 内的链接才能安全改指向，真实目录、未知链接和整目录别名会成为冲突。
 - 审计遗留 Skill，支持迁入、换链、退役、回滚和验收后清理备份。
 - 附带轻量自然语言入口 [`skills/skillmanager`](skills/skillmanager/SKILL.md)。
 
@@ -96,6 +96,8 @@ agents = ["*"]
 node dist/cli.js plan --library ~/MySkills
 node dist/cli.js sync --library ~/MySkills --apply
 ```
+
+当已登记 Skill 的来源路径发生变化时，`plan` 会把仍指向旧目标且与受管记录一致的入口显示为 `retarget`。请先检查计划，再执行 `sync --apply`；未受管链接、已被手工改向的链接，以及旧目标位于 SkillLibrary 外的链接仍会报告冲突，不会被覆盖。
 
 常用白名单操作：
 
@@ -184,7 +186,7 @@ For example, “I am Codex” can use `agents = ["codex"]`, while a portable “
 - Check out third-party Skills from local or remote Git repositories and pin their commits in `skills.lock`.
 - Detect Codex System Skills and Skills from currently enabled Plugins as read-only inventory.
 - Recognize provider-installed and Aily Runtime Skills automatically, with explicit trust records for project-owned links.
-- Create and remove per-Skill links transactionally; real directories, unknown links, and whole-directory aliases become conflicts.
+- Create, retarget, and remove per-Skill links transactionally. Retargeting is allowed only when the old target still matches managed state and remains inside SkillLibrary; real directories, unknown links, and whole-directory aliases become conflicts.
 - Audit legacy Skills, adopt, relink, retire, roll back, and finalize their migrations.
 - Include a lightweight natural-language entrypoint at [`skills/skillmanager`](skills/skillmanager/SKILL.md).
 
@@ -248,6 +250,8 @@ After adding a Skill at `~/MySkills/owned/<name>/SKILL.md`, preview and then app
 node dist/cli.js plan --library ~/MySkills
 node dist/cli.js sync --library ~/MySkills --apply
 ```
+
+When a registered Skill's source path changes, `plan` reports an existing entry as `retarget` only if it still points to the recorded managed target. Review the plan before running `sync --apply`. Unmanaged links, manually redirected links, and links whose old target is outside SkillLibrary remain conflicts and are never overwritten.
 
 Common allowlist operations:
 
