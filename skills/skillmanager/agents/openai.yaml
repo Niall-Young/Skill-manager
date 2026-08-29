@@ -1,0 +1,4 @@
+interface:
+  display_name: "SkillManager"
+  short_description: "Route global Skills to approved AI agents"
+  default_prompt: "Use $skillmanager to audit my global Skills and explain which approved agents should receive them."

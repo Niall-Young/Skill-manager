@@ -1,0 +1,32 @@
+{
+  "name": "skillmanager",
+  "version": "0.1.0",
+  "description": "Distribute skills from one dedicated library to approved AI agents.",
+  "type": "module",
+  "bin": {
+    "skillmgr": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "skills/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test test/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "prepack": "pnpm build"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "smol-toml": "^1.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "packageManager": "pnpm@11.1.2"
+}
