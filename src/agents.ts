@@ -7,6 +7,8 @@ import type { AgentConfig, AgentsRegistry } from "./model.ts";
 const KNOWN_AGENTS: Array<{ id: string; homeDir: string; skillsDir: string; capabilities: string[] }> = [
   { id: "codex", homeDir: ".codex", skillsDir: ".codex/skills", capabilities: ["image_gen", "view_image", "codex-plugins"] },
   { id: "claude", homeDir: ".claude", skillsDir: ".claude/skills", capabilities: [] },
+  { id: "qodercn", homeDir: ".qoder-cn", skillsDir: ".qoder-cn/skills", capabilities: [] },
+  { id: "kimi", homeDir: ".kimi-code", skillsDir: ".kimi-code/skills", capabilities: [] },
   { id: "gemini", homeDir: ".gemini", skillsDir: ".gemini/skills", capabilities: [] },
   { id: "kiro", homeDir: ".kiro", skillsDir: ".kiro/skills", capabilities: [] },
   { id: "qwen", homeDir: ".qwen", skillsDir: ".qwen/skills", capabilities: [] },

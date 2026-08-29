@@ -123,7 +123,10 @@ export async function applyMigrationPlan(
 ): Promise<{ transactionId: string; adopted: number }> {
   if (path.resolve(plan.library) !== path.resolve(library)) throw new Error("迁移计划不属于当前 SkillLibrary");
   const selected = plan.candidates.filter((candidate) => candidate.action === "adopt");
-  if (!selected.length) throw new Error("迁移计划中没有 action=adopt 的候选项");
+  const aliasesToSplit = plan.rootAliases.filter((item) => item.action === "split");
+  if (!selected.length && !aliasesToSplit.length) {
+    throw new Error("迁移计划中没有 action=adopt 的候选项或 action=split 的整目录别名");
+  }
   if (new Set(selected.map((candidate) => candidate.id)).size !== selected.length) {
     throw new Error("迁移计划包含重复候选项");
   }
@@ -146,7 +149,7 @@ export async function applyMigrationPlan(
     }
   }
   const currentAliases = new Map(currentPlan.rootAliases.map((alias) => [alias.agent, alias]));
-  for (const alias of plan.rootAliases.filter((item) => item.action === "split")) {
+  for (const alias of aliasesToSplit) {
     const current = currentAliases.get(alias.agent);
     if (!current || current.path !== alias.path || current.target !== alias.target) {
       throw new Error(`${alias.agent} 的整目录别名已经变化，请重新生成迁移计划`);
@@ -166,7 +169,7 @@ export async function applyMigrationPlan(
   const backupRoot = path.join(library, ".skillmanager", "migration-backups", transactionId);
 
   try {
-    for (const alias of plan.rootAliases.filter((item) => item.action === "split")) {
+    for (const alias of aliasesToSplit) {
       const stat = await lstat(alias.path).catch(() => undefined);
       if (!stat?.isSymbolicLink()) throw new Error(`整目录别名已经变化：${alias.path}`);
       if (await readlink(alias.path) !== alias.target) throw new Error(`整目录别名目标已经变化：${alias.path}`);

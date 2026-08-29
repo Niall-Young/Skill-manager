@@ -383,6 +383,28 @@ test("agent detection is read-only until the user approves a discovered agent", 
   assert.match(await readFile(path.join(sandbox, ".config", "skillmanager", "agents.toml"), "utf8"), /\[agent\.qwen\]/);
 });
 
+test("agent detection includes Qoder CN and Kimi Code with their native Skill directories", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-modern-agents-"));
+  await mkdir(path.join(sandbox, ".qoder-cn"), { recursive: true });
+  await mkdir(path.join(sandbox, ".kimi-code"), { recursive: true });
+  const output: string[] = [];
+
+  assert.equal(
+    await runCli(["agent", "detect", "--json"], {
+      cwd: sandbox,
+      home: sandbox,
+      stdout: (line) => output.push(line),
+      stderr: () => undefined,
+    }),
+    0,
+  );
+
+  assert.deepEqual(JSON.parse(output.join("\n")), [
+    { id: "qodercn", skillsDir: path.join(sandbox, ".qoder-cn", "skills"), approved: false, capabilities: [] },
+    { id: "kimi", skillsDir: path.join(sandbox, ".kimi-code", "skills"), approved: false, capabilities: [] },
+  ]);
+});
+
 test("wildcard distribution skips agents that lack a required host capability", async () => {
   const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-capability-"));
   const library = path.join(sandbox, "MySkills");
@@ -437,6 +459,40 @@ test("an approved migration can split a whole-directory agent alias before distr
     await readlink(path.join(sandbox, ".claude", "skills", "shared-expert")),
     path.join(library, "owned", "shared-expert"),
   );
+});
+
+test("migration can split whole-directory aliases without adopting a legacy Skill", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-split-only-"));
+  const library = path.join(sandbox, "MySkills");
+  const quiet = { cwd: sandbox, home: sandbox, stdout: () => undefined, stderr: () => undefined };
+  await runCli(["library", "init", library], quiet);
+  await mkdir(path.join(library, "owned", "expert"), { recursive: true });
+  await writeFile(path.join(library, "owned", "expert", "SKILL.md"), "---\nname: expert\ndescription: Expert.\n---\n");
+  await writeFile(
+    path.join(library, "skills.toml"),
+    `version = 1\n[source.own]\nkind = "owned"\npath = "owned"\n[skill.expert]\nfrom = "own"\npath = "expert"\nagents = ["claude"]\n`,
+  );
+  const codexSkills = path.join(sandbox, ".codex", "skills");
+  const claudeSkills = path.join(sandbox, ".claude", "skills");
+  await mkdir(codexSkills, { recursive: true });
+  await mkdir(path.dirname(claudeSkills), { recursive: true });
+  await (await import("node:fs/promises")).symlink(codexSkills, claudeSkills, "dir");
+  await mkdir(path.join(sandbox, ".config", "skillmanager"), { recursive: true });
+  await writeFile(
+    path.join(sandbox, ".config", "skillmanager", "agents.toml"),
+    `version = 1\n[agent.claude]\nskills_dir = "${claudeSkills}"\napproved = true\n`,
+  );
+
+  const planOutput: string[] = [];
+  await runCli(["migrate", "plan", "--library", library], { ...quiet, stdout: (line) => planOutput.push(line) });
+  const plan = JSON.parse(planOutput.join("\n"));
+  plan.rootAliases[0].action = "split";
+  const planFile = path.join(sandbox, "split-only.json");
+  await writeFile(planFile, JSON.stringify(plan));
+
+  assert.equal(await runCli(["migrate", "apply", planFile, "--library", library], quiet), 0);
+  assert.equal((await (await import("node:fs/promises")).lstat(claudeSkills)).isDirectory(), true);
+  assert.equal(await readlink(path.join(claudeSkills, "expert")), path.join(library, "owned", "expert"));
 });
 
 test("migration rollback refuses to delete unmanaged content in a split agent root", async () => {

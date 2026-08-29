@@ -11,9 +11,9 @@ Distribute personal global Agent Skills from one dedicated library with explicit
 
 ### 项目简介
 
-SkillManager 把 Skill 的“原件”和 Agent 的“使用入口”分开：原件统一放在独立的 `MySkills` 仓库，Codex、Claude、Gemini 等 Agent 的全局 Skill 目录只接收按白名单生成的软链接。项目级 Skill、Plugin Skill 和 Agent 系统 Skill 不属于这个分发流程。
+SkillManager 把 Skill 的“原件”和 Agent 的“使用入口”分开：原件统一放在独立的 `MySkills` 仓库，Codex、Claude Code、Qoder CN、Kimi Code、Gemini 等 Agent 的全局 Skill 目录只接收按白名单生成的软链接。项目级 Skill、Plugin Skill 和 Agent 系统 Skill 不属于这个分发流程。
 
-当前版本是面向单机的 CLI v0.1。它不会自动改动你现有的全局 Skill；迁移必须先生成计划，再把候选项明确标记为 `adopt`。
+当前版本是面向单机的 CLI v0.1。它不会自动改动你现有的全局 Skill；迁移必须先生成计划，再把候选项明确标记为 `adopt`，或把需要取消的整目录别名标记为 `split`。
 
 最简单的判断方式是先分清“谁拥有它”：
 
@@ -60,6 +60,9 @@ node dist/cli.js --help
 node dist/cli.js library init ~/MySkills
 node dist/cli.js agent detect --json
 node dist/cli.js agent approve codex
+node dist/cli.js agent approve claude
+node dist/cli.js agent approve qodercn
+node dist/cli.js agent approve kimi
 ```
 
 `agent detect` 是只读操作；只有 `agent approve` 才会把 Agent 写入本机的 `~/.config/skillmanager/agents.toml`。
@@ -149,9 +152,9 @@ pnpm pack --dry-run
 
 ### Overview
 
-SkillManager separates Skill originals from Agent discovery entries. Originals live in a dedicated `MySkills` repository, while global Skill directories for Codex, Claude, Gemini, and other agents receive only allowlisted symlinks. Project-local, Plugin-owned, and Agent System Skills stay outside this distribution flow.
+SkillManager separates Skill originals from Agent discovery entries. Originals live in a dedicated `MySkills` repository, while global Skill directories for Codex, Claude Code, Qoder CN, Kimi Code, Gemini, and other agents receive only allowlisted symlinks. Project-local, Plugin-owned, and Agent System Skills stay outside this distribution flow.
 
-The current release is a local-first CLI v0.1. It never migrates existing global Skills automatically: migration starts with a plan, and every selected candidate must be explicitly changed to `adopt`.
+The current release is a local-first CLI v0.1. It never migrates existing global Skills automatically: migration starts with a plan, and each selected Skill must be changed to `adopt`, or a whole-directory alias must be changed to `split`.
 
 The ownership rule is intentionally simple:
 
@@ -198,6 +201,9 @@ The built npm binary is named `skillmgr`. Inside this repository, `node dist/cli
 node dist/cli.js library init ~/MySkills
 node dist/cli.js agent detect --json
 node dist/cli.js agent approve codex
+node dist/cli.js agent approve claude
+node dist/cli.js agent approve qodercn
+node dist/cli.js agent approve kimi
 ```
 
 `agent detect` is read-only. Only `agent approve` writes the Agent to `~/.config/skillmanager/agents.toml`.
