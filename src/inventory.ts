@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { lstat, readdir, readFile, readlink } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "smol-toml";
 
@@ -8,8 +8,9 @@ import { resolveSkillSource } from "./registry.ts";
 export interface InventoryItem {
   id: string;
   name: string;
-  ownership: "library-owned" | "plugin-owned" | "system-owned" | "runtime-owned" | "legacy-candidate" | "unresolved";
+  ownership: "library-owned" | "plugin-owned" | "system-owned" | "runtime-owned" | "external-owned" | "legacy-candidate" | "unresolved";
   path: string;
+  linkPath?: string;
   manageable: boolean;
   owner?: string;
   version?: string;
@@ -19,6 +20,90 @@ export interface InventoryResult {
   managed: InventoryItem[];
   external: InventoryItem[];
   diagnostics: string[];
+}
+
+export async function buildCodexOwnedInventory(home: string, diagnostics: string[] = []): Promise<InventoryItem[]> {
+  const systemRoot = path.join(home, ".codex", "skills", ".system");
+  const system = (await directoryNamesWithSkill(systemRoot)).map<InventoryItem>((name) => ({
+    id: `system:codex/${name}`,
+    name,
+    ownership: "system-owned",
+    path: path.join(systemRoot, name),
+    manageable: false,
+    owner: "codex",
+  }));
+  return [...await scanCodexPlugins(home, diagnostics), ...system].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export async function buildExternalLinkInventory(
+  home: string,
+  registry: SkillsRegistry,
+  diagnostics: string[] = [],
+): Promise<InventoryItem[]> {
+  const items = new Map<string, InventoryItem>();
+  for (const [id, external] of Object.entries(registry.external)) {
+    const stat = await lstat(external.link_path).catch(() => undefined);
+    if (!stat?.isSymbolicLink()) {
+      diagnostics.push(`外部 Skill 登记已失效：${external.link_path} 不再是软链接`);
+      continue;
+    }
+    const target = path.resolve(path.dirname(external.link_path), await readlink(external.link_path));
+    if (target !== path.resolve(external.path)) {
+      diagnostics.push(`外部 Skill 登记已失效：${external.link_path} 的目标已经变化`);
+      continue;
+    }
+    items.set(external.link_path, {
+      id: `external:${external.agent}/${external.name}`,
+      name: external.name,
+      ownership: "external-owned",
+      path: target,
+      linkPath: external.link_path,
+      manageable: false,
+      owner: external.owner,
+    });
+  }
+
+  const lock: { skills?: Record<string, { source?: string }> } = await readFile(
+    path.join(home, ".agents", ".skill-lock.json"),
+    "utf8",
+  )
+    .then((content) => JSON.parse(content) as { skills?: Record<string, { source?: string }> })
+    .catch(() => ({ skills: {} }));
+  const codexSkills = path.join(home, ".codex", "skills");
+  const entries = await readdir(codexSkills, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isSymbolicLink()) continue;
+    const linkPath = path.join(codexSkills, entry.name);
+    if (items.has(linkPath)) continue;
+    const target = path.resolve(path.dirname(linkPath), await readlink(linkPath));
+    const locked = lock.skills?.[entry.name];
+    if (locked && !registry.skill[entry.name] && target === path.join(home, ".agents", "skills", entry.name)) {
+      items.set(linkPath, {
+        id: `external:codex/${entry.name}`,
+        name: entry.name,
+        ownership: "external-owned",
+        path: target,
+        linkPath,
+        manageable: false,
+        owner: locked.source ?? ".agents",
+      });
+      continue;
+    }
+    const ailyRoot = path.join(home, ".aily-cli");
+    const relative = path.relative(ailyRoot, target);
+    if (relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+      items.set(linkPath, {
+        id: `runtime:codex/${entry.name}`,
+        name: entry.name,
+        ownership: "runtime-owned",
+        path: target,
+        linkPath,
+        manageable: false,
+        owner: "aily-cli",
+      });
+    }
+  }
+  return [...items.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 
 async function directoryNamesWithSkill(root: string): Promise<string[]> {
@@ -115,16 +200,9 @@ export async function buildInventory(home: string, library: string, registry: Sk
     path: resolveSkillSource(library, registry, name),
     manageable: true,
   }));
-  const systemRoot = path.join(home, ".codex", "skills", ".system");
-  const system = (await directoryNamesWithSkill(systemRoot)).map<InventoryItem>((name) => ({
-    id: `system:codex/${name}`,
-    name,
-    ownership: "system-owned",
-    path: path.join(systemRoot, name),
-    manageable: false,
-    owner: "codex",
-  }));
-  const plugin = await scanCodexPlugins(home, diagnostics);
-  const external = [...plugin, ...system].sort((a, b) => a.id.localeCompare(b.id));
+  const external = [
+    ...await buildCodexOwnedInventory(home, diagnostics),
+    ...await buildExternalLinkInventory(home, registry, diagnostics),
+  ].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
   return { managed, external, diagnostics };
 }

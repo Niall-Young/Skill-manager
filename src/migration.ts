@@ -4,7 +4,8 @@ import path from "node:path";
 
 import type { AgentsRegistry } from "./model.ts";
 import type { SkillsRegistry } from "./model.ts";
-import { loadSkillsRegistry, saveSkillsRegistry } from "./registry.ts";
+import { buildCodexOwnedInventory, buildExternalLinkInventory, type InventoryItem } from "./inventory.ts";
+import { loadSkillsRegistry, resolveSkillSource, saveSkillsRegistry } from "./registry.ts";
 import { applySyncPlan, buildSyncPlan } from "./sync.ts";
 
 export interface MigrationCandidate {
@@ -15,7 +16,9 @@ export interface MigrationCandidate {
   resolvedPath: string;
   proposedLibraryPath: string;
   digest: string;
-  action: "review" | "adopt" | "ignore";
+  brokenLink?: boolean;
+  replacement?: Pick<InventoryItem, "id" | "ownership" | "path">;
+  action: "review" | "adopt" | "relink" | "retire" | "prune" | "ignore";
   agents: string[];
 }
 
@@ -59,6 +62,14 @@ export async function createMigrationPlan(
   const rootAliases: MigrationPlan["rootAliases"] = [];
   const candidates: MigrationCandidate[] = [];
   const diagnostics: string[] = [];
+  const registry = await loadSkillsRegistry(library);
+  const externalLinks = new Set(
+    (await buildExternalLinkInventory(home, registry, diagnostics)).map((item) => item.linkPath),
+  );
+  const replacements = new Map<string, InventoryItem>();
+  for (const item of await buildCodexOwnedInventory(home, diagnostics)) {
+    if (!replacements.has(item.name)) replacements.set(item.name, item);
+  }
 
   for (const [agentName, agent] of Object.entries(agents.agent)) {
     const rootStat = await lstat(agent.skills_dir).catch(() => undefined);
@@ -72,13 +83,31 @@ export async function createMigrationPlan(
     for (const entry of entries) {
       if (entry.name.startsWith(".")) continue;
       const sourcePath = path.join(agent.skills_dir, entry.name);
+      if (externalLinks.has(sourcePath)) continue;
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       const resolvedPath = entry.isSymbolicLink()
         ? path.resolve(path.dirname(sourcePath), await readlink(sourcePath))
         : sourcePath;
       if (isInside(library, resolvedPath)) continue;
+      const resolvedStat = await lstat(resolvedPath).catch(() => undefined);
+      if (entry.isSymbolicLink() && !resolvedStat) {
+        candidates.push({
+          id: `legacy:${agentName}/${entry.name}`,
+          name: entry.name,
+          agent: agentName,
+          sourcePath,
+          resolvedPath,
+          proposedLibraryPath: path.join(library, "owned", entry.name),
+          digest: createHash("sha256").update(`broken-link:${resolvedPath}`).digest("hex"),
+          brokenLink: true,
+          action: "review",
+          agents: [],
+        });
+        continue;
+      }
       const skillFile = path.join(resolvedPath, "SKILL.md");
       if (!(await readFile(skillFile, "utf8").then(() => true).catch(() => false))) continue;
+      const replacement = agentName === "codex" ? replacements.get(entry.name) : undefined;
       candidates.push({
         id: `legacy:${agentName}/${entry.name}`,
         name: entry.name,
@@ -87,6 +116,9 @@ export async function createMigrationPlan(
         resolvedPath,
         proposedLibraryPath: path.join(library, "owned", entry.name),
         digest: await hashDirectory(resolvedPath),
+        replacement: replacement
+          ? { id: replacement.id, ownership: replacement.ownership, path: replacement.path }
+          : undefined,
         action: "review",
         agents: [],
       });
@@ -108,6 +140,9 @@ interface MigrationJournal {
   transactionId: string;
   previousRegistry: string;
   adopted: Array<{ destination: string; backups: Array<{ original: string; backup: string }> }>;
+  relinked: Array<{ original: string; backup: string; target: string }>;
+  retired: Array<{ original: string; backup: string; replacementPath: string }>;
+  pruned: Array<{ original: string; backup: string; target: string }>;
   rootAliases: Array<{ original: string; backup: string }>;
 }
 
@@ -117,24 +152,31 @@ interface ManagedLinksState {
 }
 
 export async function applyMigrationPlan(
+  home: string,
   library: string,
   plan: MigrationPlan,
   agentsRegistry: AgentsRegistry,
-): Promise<{ transactionId: string; adopted: number }> {
+): Promise<{ transactionId: string; adopted: number; relinked: number; retired: number; pruned: number }> {
   if (path.resolve(plan.library) !== path.resolve(library)) throw new Error("迁移计划不属于当前 SkillLibrary");
-  const selected = plan.candidates.filter((candidate) => candidate.action === "adopt");
+  const selected = plan.candidates.filter((candidate) => ["adopt", "relink", "retire", "prune"].includes(candidate.action));
+  const adopted = selected.filter((candidate) => candidate.action === "adopt");
+  const relinked = selected.filter((candidate) => candidate.action === "relink");
+  const retired = selected.filter((candidate) => candidate.action === "retire");
+  const pruned = selected.filter((candidate) => candidate.action === "prune");
   const aliasesToSplit = plan.rootAliases.filter((item) => item.action === "split");
   if (!selected.length && !aliasesToSplit.length) {
-    throw new Error("迁移计划中没有 action=adopt 的候选项或 action=split 的整目录别名");
+    throw new Error("迁移计划中没有可执行的候选项或 action=split 的整目录别名");
   }
   if (new Set(selected.map((candidate) => candidate.id)).size !== selected.length) {
     throw new Error("迁移计划包含重复候选项");
   }
 
-  const currentPlan = await createMigrationPlan("", library, agentsRegistry);
+  const currentPlan = await createMigrationPlan(home, library, agentsRegistry);
   const currentCandidates = new Map(currentPlan.candidates.map((candidate) => [candidate.id, candidate]));
   for (const candidate of selected) {
-    if (!candidate.agents.length) throw new Error(`${candidate.id} 尚未填写 Agent 白名单`);
+    if (!["retire", "prune"].includes(candidate.action) && !candidate.agents.length) {
+      throw new Error(`${candidate.id} 尚未填写 Agent 白名单`);
+    }
     const current = currentCandidates.get(candidate.id);
     if (
       !current
@@ -144,6 +186,9 @@ export async function applyMigrationPlan(
       || current.resolvedPath !== candidate.resolvedPath
       || current.proposedLibraryPath !== candidate.proposedLibraryPath
       || current.digest !== candidate.digest
+      || current.brokenLink !== candidate.brokenLink
+      || current.replacement?.id !== candidate.replacement?.id
+      || current.replacement?.path !== candidate.replacement?.path
     ) {
       throw new Error(`${candidate.id} 的来源、路径或内容已经变化，请重新生成迁移计划`);
     }
@@ -157,7 +202,7 @@ export async function applyMigrationPlan(
   }
 
   const grouped = new Map<string, MigrationCandidate[]>();
-  for (const candidate of selected) grouped.set(candidate.name, [...(grouped.get(candidate.name) ?? []), candidate]);
+  for (const candidate of adopted) grouped.set(candidate.name, [...(grouped.get(candidate.name) ?? []), candidate]);
   for (const [name, group] of grouped) {
     if (new Set(group.map((item) => item.digest)).size > 1) throw new Error(`${name} 存在同名不同内容，不能自动迁移`);
   }
@@ -165,7 +210,27 @@ export async function applyMigrationPlan(
   const transactionId = `migration-${new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-")}`;
   const previousRegistry = await readFile(path.join(library, "skills.toml"), "utf8");
   const registry: SkillsRegistry = await loadSkillsRegistry(library);
-  const journal: MigrationJournal = { version: 1, transactionId, previousRegistry, adopted: [], rootAliases: [] };
+  for (const candidate of relinked) {
+    if (!registry.skill[candidate.name]) throw new Error(`${candidate.name} 尚未登记在 SkillLibrary，不能 relink`);
+  }
+  for (const candidate of retired) {
+    if (!candidate.replacement || !["plugin-owned", "system-owned"].includes(candidate.replacement.ownership)) {
+      throw new Error(`${candidate.name} 没有可验证的 Codex System/Plugin 替代项，不能 retire`);
+    }
+  }
+  for (const candidate of pruned) {
+    if (!candidate.brokenLink) throw new Error(`${candidate.name} 不是断开的软链接，不能 prune`);
+  }
+  const journal: MigrationJournal = {
+    version: 1,
+    transactionId,
+    previousRegistry,
+    adopted: [],
+    relinked: [],
+    retired: [],
+    pruned: [],
+    rootAliases: [],
+  };
   const backupRoot = path.join(library, ".skillmanager", "migration-backups", transactionId);
 
   try {
@@ -199,6 +264,36 @@ export async function applyMigrationPlan(
       };
     }
 
+    for (const candidate of relinked) {
+      const backup = path.join(backupRoot, candidate.agent, candidate.name);
+      await mkdir(path.dirname(backup), { recursive: true });
+      await rename(candidate.sourcePath, backup);
+      journal.relinked.push({
+        original: candidate.sourcePath,
+        backup,
+        target: resolveSkillSource(library, registry, candidate.name),
+      });
+      registry.skill[candidate.name].agents = [...new Set(candidate.agents)];
+    }
+
+    for (const candidate of retired) {
+      const backup = path.join(backupRoot, candidate.agent, candidate.name);
+      await mkdir(path.dirname(backup), { recursive: true });
+      await rename(candidate.sourcePath, backup);
+      journal.retired.push({
+        original: candidate.sourcePath,
+        backup,
+        replacementPath: candidate.replacement!.path,
+      });
+    }
+
+    for (const candidate of pruned) {
+      const backup = path.join(backupRoot, candidate.agent, candidate.name);
+      await mkdir(path.dirname(backup), { recursive: true });
+      await rename(candidate.sourcePath, backup);
+      journal.pruned.push({ original: candidate.sourcePath, backup, target: candidate.resolvedPath });
+    }
+
     await saveSkillsRegistry(library, registry);
     const syncPlan = await buildSyncPlan(library, registry, agentsRegistry);
     await applySyncPlan(syncPlan);
@@ -206,9 +301,27 @@ export async function applyMigrationPlan(
       path.join(library, ".skillmanager", "transactions", `${transactionId}.json`),
       `${JSON.stringify(journal, null, 2)}\n`,
     );
-    return { transactionId, adopted: grouped.size };
+    return {
+      transactionId,
+      adopted: grouped.size,
+      relinked: journal.relinked.length,
+      retired: journal.retired.length,
+      pruned: journal.pruned.length,
+    };
   } catch (error) {
     await writeFile(path.join(library, "skills.toml"), previousRegistry, "utf8");
+    for (const item of journal.relinked.reverse()) {
+      await rm(item.original, { recursive: true, force: true });
+      await rename(item.backup, item.original).catch(() => undefined);
+    }
+    for (const item of journal.retired.reverse()) {
+      await rm(item.original, { recursive: true, force: true });
+      await rename(item.backup, item.original).catch(() => undefined);
+    }
+    for (const item of journal.pruned.reverse()) {
+      await rm(item.original, { recursive: true, force: true });
+      await rename(item.backup, item.original).catch(() => undefined);
+    }
     for (const item of journal.adopted.reverse()) {
       for (const backup of item.backups.reverse()) {
         await rm(backup.original, { recursive: true, force: true });
@@ -227,9 +340,16 @@ export async function applyMigrationPlan(
 export async function rollbackMigration(library: string, transactionId: string): Promise<void> {
   if (!transactionId.startsWith("migration-")) throw new Error("只允许回滚 migration 事务");
   const journalPath = path.join(library, ".skillmanager", "transactions", `${transactionId}.json`);
-  const journal = JSON.parse(await readFile(journalPath, "utf8")) as MigrationJournal & { rolledBackAt?: string };
+  const journal = JSON.parse(await readFile(journalPath, "utf8")) as MigrationJournal & {
+    rolledBackAt?: string;
+    finalizedAt?: string;
+  };
   if (journal.transactionId !== transactionId) throw new Error("迁移事务 ID 不匹配");
   if (journal.rolledBackAt) throw new Error(`迁移事务已经回滚：${journal.rolledBackAt}`);
+  if (journal.finalizedAt) throw new Error(`迁移事务已经结束：${journal.finalizedAt}`);
+  journal.relinked ??= [];
+  journal.retired ??= [];
+  journal.pruned ??= [];
 
   const managedStatePath = path.join(library, ".skillmanager", "managed-links.json");
   const managedState = await readFile(managedStatePath, "utf8")
@@ -252,6 +372,15 @@ export async function rollbackMigration(library: string, transactionId: string):
       if (!(await lstat(backup.backup).catch(() => undefined))) {
         throw new Error(`无法恢复，备份不存在：${backup.backup}`);
       }
+    }
+  }
+  for (const item of [...journal.relinked, ...journal.retired, ...journal.pruned]) {
+    const current = await lstat(item.original).catch(() => undefined);
+    if (current && !current.isSymbolicLink()) {
+      throw new Error(`无法恢复，原位置已被真实文件占用：${item.original}`);
+    }
+    if (!(await lstat(item.backup).catch(() => undefined))) {
+      throw new Error(`无法恢复，备份不存在：${item.backup}`);
     }
   }
   for (const alias of journal.rootAliases ?? []) {
@@ -286,6 +415,13 @@ export async function rollbackMigration(library: string, transactionId: string):
     }
     await rm(item.destination, { recursive: true, force: true });
   }
+  for (const item of [...journal.relinked, ...journal.retired, ...journal.pruned].reverse()) {
+    const current = await lstat(item.original).catch(() => undefined);
+    if (current?.isSymbolicLink()) await rm(item.original, { force: true });
+    else if (current) throw new Error(`无法恢复，原位置已被真实文件占用：${item.original}`);
+    await mkdir(path.dirname(item.original), { recursive: true });
+    await rename(item.backup, item.original);
+  }
   for (const alias of [...(journal.rootAliases ?? [])].reverse()) {
     await rm(alias.original, { recursive: true, force: true });
     await rename(alias.backup, alias.original);
@@ -294,10 +430,84 @@ export async function rollbackMigration(library: string, transactionId: string):
 
   if (managedState) {
     const removedTargets = new Set(journal.adopted.map((item) => item.destination));
-    managedState.links = managedState.links.filter((link) => !removedTargets.has(link.targetPath));
+    const restoredPaths = new Set([...journal.relinked, ...journal.retired, ...journal.pruned].map((item) => item.original));
+    managedState.links = managedState.links.filter(
+      (link) => !removedTargets.has(link.targetPath) && !restoredPaths.has(link.linkPath),
+    );
     await writeFile(managedStatePath, `${JSON.stringify(managedState, null, 2)}\n`, "utf8");
   }
 
   journal.rolledBackAt = new Date().toISOString();
+  await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+}
+
+export async function finalizeMigration(library: string, transactionId: string): Promise<void> {
+  if (!transactionId.startsWith("migration-")) throw new Error("只允许结束 migration 事务");
+  const journalPath = path.join(library, ".skillmanager", "transactions", `${transactionId}.json`);
+  const journal = JSON.parse(await readFile(journalPath, "utf8")) as MigrationJournal & {
+    rolledBackAt?: string;
+    finalizedAt?: string;
+  };
+  if (journal.transactionId !== transactionId) throw new Error("迁移事务 ID 不匹配");
+  if (journal.rolledBackAt) throw new Error(`迁移事务已经回滚：${journal.rolledBackAt}`);
+  if (journal.finalizedAt) throw new Error(`迁移事务已经结束：${journal.finalizedAt}`);
+  journal.relinked ??= [];
+  journal.retired ??= [];
+  journal.pruned ??= [];
+
+  for (const item of journal.adopted) {
+    if (!isInside(library, item.destination) || path.resolve(item.destination) === path.resolve(library)) {
+      throw new Error("迁移日志包含 SkillLibrary 以外的目标路径");
+    }
+    const skillFile = await lstat(path.join(item.destination, "SKILL.md")).catch(() => undefined);
+    if (!skillFile?.isFile()) throw new Error(`不能结束迁移，目标 Skill 已失效：${item.destination}`);
+    for (const backup of item.backups) {
+      const current = await lstat(backup.original).catch(() => undefined);
+      if (!current?.isSymbolicLink()) throw new Error(`不能结束迁移，入口不再是软链接：${backup.original}`);
+      const target = path.resolve(path.dirname(backup.original), await readlink(backup.original));
+      if (target !== path.resolve(item.destination)) throw new Error(`不能结束迁移，入口目标已经变化：${backup.original}`);
+    }
+  }
+  for (const item of journal.relinked) {
+    const current = await lstat(item.original).catch(() => undefined);
+    if (!current?.isSymbolicLink()) throw new Error(`不能结束迁移，入口不再是软链接：${item.original}`);
+    const target = path.resolve(path.dirname(item.original), await readlink(item.original));
+    if (target !== path.resolve(item.target)) throw new Error(`不能结束迁移，入口目标已经变化：${item.original}`);
+  }
+  for (const item of journal.retired) {
+    if (await lstat(item.original).then(() => true).catch(() => false)) {
+      throw new Error(`不能结束迁移，已退役入口再次出现：${item.original}`);
+    }
+    const replacement = await lstat(path.join(item.replacementPath, "SKILL.md")).catch(() => undefined);
+    if (!replacement?.isFile()) throw new Error(`不能结束迁移，Codex 替代项已失效：${item.replacementPath}`);
+  }
+  for (const item of journal.pruned) {
+    if (await lstat(item.original).then(() => true).catch(() => false)) {
+      throw new Error(`不能结束迁移，已清理断链再次出现：${item.original}`);
+    }
+  }
+  for (const alias of journal.rootAliases) {
+    const current = await lstat(alias.original).catch(() => undefined);
+    if (!current?.isDirectory() || current.isSymbolicLink()) {
+      throw new Error(`不能结束迁移，Agent Skill 目录已变化：${alias.original}`);
+    }
+  }
+  const backups = [
+    ...journal.adopted.flatMap((item) => item.backups.map((backup) => backup.backup)),
+    ...journal.relinked.map((item) => item.backup),
+    ...journal.retired.map((item) => item.backup),
+    ...journal.pruned.map((item) => item.backup),
+    ...journal.rootAliases.map((item) => item.backup),
+  ];
+  for (const backup of backups) {
+    if (!(await lstat(backup).catch(() => undefined))) throw new Error(`不能结束迁移，备份不存在：${backup}`);
+  }
+
+  const backupRoot = path.join(library, ".skillmanager", "migration-backups", transactionId);
+  if (!isInside(library, backupRoot) || path.resolve(backupRoot) === path.resolve(library)) {
+    throw new Error("迁移备份路径无效");
+  }
+  await rm(backupRoot, { recursive: true, force: true });
+  journal.finalizedAt = new Date().toISOString();
   await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
 }

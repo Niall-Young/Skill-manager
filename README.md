@@ -13,14 +13,14 @@ Distribute personal global Agent Skills from one dedicated library with explicit
 
 SkillManager 把 Skill 的“原件”和 Agent 的“使用入口”分开：原件统一放在独立的 `MySkills` 仓库，Codex、Claude Code、Qoder CN、Kimi Code、Gemini 等 Agent 的全局 Skill 目录只接收按白名单生成的软链接。项目级 Skill、Plugin Skill 和 Agent 系统 Skill 不属于这个分发流程。
 
-当前版本是面向单机的 CLI v0.1。它不会自动改动你现有的全局 Skill；迁移必须先生成计划，再把候选项明确标记为 `adopt`，或把需要取消的整目录别名标记为 `split`。
+当前版本是面向单机的 CLI v0.1。它不会自动改动你现有的全局 Skill；迁移必须先生成计划，再把候选项明确标记为 `adopt`、`relink`、`retire` 或 `prune`，或把需要取消的整目录别名标记为 `split`。
 
 最简单的判断方式是先分清“谁拥有它”：
 
 | Skill 类型 | 原件放在哪里 | SkillManager 怎么处理 |
 | --- | --- | --- |
 | 个人、可跨 Agent 使用 | 独立的 `~/MySkills` | 按 Agent 白名单分发软链接 |
-| 只属于某个项目 | 该项目自己的 Skill 目录 | 完全不处理 |
+| 只属于某个项目 | 该项目自己的 Skill 目录 | 不迁移；显式登记后只审计入口 |
 | Plugin / System / Runtime 提供 | 原 Agent 生态管理的位置 | 只读识别，绝不复制、迁移或链接 |
 
 所以“我是 Codex”可以设为 `agents = ["codex"]`；“我是专家”可以设为 `agents = ["*"]`。后者也不会盲目发给所有目录，只会发给你已经批准、且具备所需能力的 Agent。
@@ -31,8 +31,9 @@ SkillManager 把 Skill 的“原件”和 Agent 的“使用入口”分开：�
 - 使用 `skills.toml` 为每个 Skill 指定 Agent 白名单，`["*"]` 仅覆盖已批准且能力兼容的 Agent。
 - 从本地或远程 Git 仓库检出第三方 Skill，并在 `skills.lock` 中固定 commit。
 - 识别 Codex System 与当前启用 Plugin 的 Skill，只读展示、不迁移。
+- 自动识别 `.agents` 安装器和 Aily Runtime 的外部 Skill；项目链接可显式登记为外部所有。
 - 以事务方式创建和移除逐 Skill 链接；真实目录、未知链接和整目录别名会成为冲突。
-- 审计遗留 Skill，显式迁入 `MySkills`，并支持迁移回滚。
+- 审计遗留 Skill，支持迁入、换链、退役、回滚和验收后清理备份。
 - 附带轻量自然语言入口 [`skills/skillmanager`](skills/skillmanager/SKILL.md)。
 
 ### 快速开始
@@ -104,6 +105,13 @@ node dist/cli.js target all expert --library ~/MySkills
 node dist/cli.js target remove expert claude --library ~/MySkills
 ```
 
+项目仍拥有正文、Codex 只保留入口的 Skill，需要显式登记：
+
+```sh
+node dist/cli.js external trust codex project-skill --owner PROJECT_NAME --library ~/MySkills
+node dist/cli.js external untrust codex project-skill --library ~/MySkills
+```
+
 添加第三方 Git 来源和其中的 Skill：
 
 ```sh
@@ -118,12 +126,15 @@ node dist/cli.js audit --library ~/MySkills
 node dist/cli.js migrate plan --library ~/MySkills --output migration.json
 ```
 
-生成的迁移候选默认都是 `"action": "review"`。确认来源后，把选中的候选改为 `"action": "adopt"` 并填写 `agents`，再执行：
+生成的迁移候选默认都是 `"action": "review"`。确认来源后选择动作：`adopt` 把个人原件迁入 MySkills；`relink` 把旧入口换到已登记的同名 MySkills Skill；`retire` 仅用于已有同名 Codex System/Plugin 替代项的旧版本；`prune` 仅清理目标不存在的断链。`adopt` 和 `relink` 都必须填写 `agents`。
 
 ```sh
 node dist/cli.js migrate apply migration.json --library ~/MySkills
 node dist/cli.js migrate rollback TRANSACTION_ID --library ~/MySkills
+node dist/cli.js migrate finalize TRANSACTION_ID --library ~/MySkills
 ```
+
+`finalize` 会再次验证迁入正文和软链接，再删除该事务的备份并关闭回滚窗口。
 
 ### 配置与边界
 
@@ -154,14 +165,14 @@ pnpm pack --dry-run
 
 SkillManager separates Skill originals from Agent discovery entries. Originals live in a dedicated `MySkills` repository, while global Skill directories for Codex, Claude Code, Qoder CN, Kimi Code, Gemini, and other agents receive only allowlisted symlinks. Project-local, Plugin-owned, and Agent System Skills stay outside this distribution flow.
 
-The current release is a local-first CLI v0.1. It never migrates existing global Skills automatically: migration starts with a plan, and each selected Skill must be changed to `adopt`, or a whole-directory alias must be changed to `split`.
+The current release is a local-first CLI v0.1. It never migrates existing global Skills automatically: migration starts with a plan, and each selected Skill must be changed to `adopt`, `relink`, `retire`, or `prune`, or a whole-directory alias must be changed to `split`.
 
 The ownership rule is intentionally simple:
 
 | Skill type | Where its original belongs | SkillManager behavior |
 | --- | --- | --- |
 | Personal and portable across Agents | Dedicated `~/MySkills` library | Distribute allowlisted symlinks |
-| Owned by one project | That project's own Skill directory | Leave it untouched |
+| Owned by one project | That project's own Skill directory | Never migrate it; audit only explicitly trusted links |
 | Supplied by a Plugin, System, or Runtime | Its Agent ecosystem's managed location | Detect read-only; never copy, migrate, or link it |
 
 For example, “I am Codex” can use `agents = ["codex"]`, while a portable “expert” Skill can use `agents = ["*"]`. The wildcard still targets only approved Agents that satisfy the Skill's capability requirements.
@@ -172,8 +183,9 @@ For example, “I am Codex” can use `agents = ["codex"]`, while a portable “
 - Assign each Skill an Agent allowlist in `skills.toml`; `["*"]` includes only approved, capability-compatible Agents.
 - Check out third-party Skills from local or remote Git repositories and pin their commits in `skills.lock`.
 - Detect Codex System Skills and Skills from currently enabled Plugins as read-only inventory.
+- Recognize provider-installed and Aily Runtime Skills automatically, with explicit trust records for project-owned links.
 - Create and remove per-Skill links transactionally; real directories, unknown links, and whole-directory aliases become conflicts.
-- Audit legacy Skills, explicitly adopt them into `MySkills`, and roll migrations back.
+- Audit legacy Skills, adopt, relink, retire, roll back, and finalize their migrations.
 - Include a lightweight natural-language entrypoint at [`skills/skillmanager`](skills/skillmanager/SKILL.md).
 
 ### Quick Start
@@ -245,6 +257,13 @@ node dist/cli.js target all expert --library ~/MySkills
 node dist/cli.js target remove expert claude --library ~/MySkills
 ```
 
+Explicitly register a project-owned Skill whose source stays with its project:
+
+```sh
+node dist/cli.js external trust codex project-skill --owner PROJECT_NAME --library ~/MySkills
+node dist/cli.js external untrust codex project-skill --library ~/MySkills
+```
+
 Add a third-party Git source and one of its Skills:
 
 ```sh
@@ -259,12 +278,15 @@ node dist/cli.js audit --library ~/MySkills
 node dist/cli.js migrate plan --library ~/MySkills --output migration.json
 ```
 
-Every generated candidate starts with `"action": "review"`. After confirming its source, change selected candidates to `"action": "adopt"`, fill in `agents`, and run:
+Every generated candidate starts with `"action": "review"`. Use `adopt` to move a personal original into MySkills, `relink` to replace a legacy entry with an already registered MySkills Skill, `retire` only when a same-name Codex System/Plugin replacement is present, or `prune` only for a symlink whose target is missing. Both `adopt` and `relink` require `agents`.
 
 ```sh
 node dist/cli.js migrate apply migration.json --library ~/MySkills
 node dist/cli.js migrate rollback TRANSACTION_ID --library ~/MySkills
+node dist/cli.js migrate finalize TRANSACTION_ID --library ~/MySkills
 ```
+
+`finalize` revalidates migrated originals and links, removes that transaction's backup, and closes the rollback window.
 
 ### Configuration and Boundaries
 

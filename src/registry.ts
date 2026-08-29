@@ -30,8 +30,10 @@ export async function loadSkillsRegistry(library: string): Promise<SkillsRegistr
   const root = asObject(raw, "skills.toml");
   const sourcesRaw = asObject(root.source ?? {}, "source");
   const skillsRaw = asObject(root.skill ?? {}, "skill");
+  const externalRaw = asObject(root.external ?? {}, "external");
   const source: SkillsRegistry["source"] = {};
   const skill: SkillsRegistry["skill"] = {};
+  const external: SkillsRegistry["external"] = {};
 
   for (const [name, value] of Object.entries(sourcesRaw)) {
     const entry = asObject(value, `source.${name}`);
@@ -60,7 +62,27 @@ export async function loadSkillsRegistry(library: string): Promise<SkillsRegistr
     };
   }
 
-  return { version: Number(root.version ?? 1), source, skill };
+  for (const [id, value] of Object.entries(externalRaw)) {
+    const entry = asObject(value, `external.${id}`);
+    if (
+      typeof entry.agent !== "string"
+      || typeof entry.name !== "string"
+      || typeof entry.link_path !== "string"
+      || typeof entry.path !== "string"
+      || typeof entry.owner !== "string"
+    ) {
+      throw new Error(`external.${id} 必须包含 agent、name、link_path、path 和 owner`);
+    }
+    external[id] = {
+      agent: entry.agent,
+      name: entry.name,
+      link_path: path.resolve(entry.link_path),
+      path: path.resolve(entry.path),
+      owner: entry.owner,
+    };
+  }
+
+  return { version: Number(root.version ?? 1), source, skill, external };
 }
 
 function withoutUndefined(value: unknown): unknown {

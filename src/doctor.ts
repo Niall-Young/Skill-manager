@@ -26,6 +26,43 @@ export async function runDoctor(
       issues.push({ level: "error", code: "missing-targets", message: `${name} 没有 Agent 白名单` });
     }
   }
+  for (const external of Object.values(registry.external)) {
+    const relativeToLibrary = path.relative(path.resolve(library), path.resolve(external.path));
+    if (relativeToLibrary === "" || (!relativeToLibrary.startsWith("..") && !path.isAbsolute(relativeToLibrary))) {
+      issues.push({
+        level: "error",
+        code: "external-source-library",
+        message: `${external.agent}/${external.name} 已经位于 SkillLibrary，不应登记为外部 Skill`,
+      });
+      continue;
+    }
+    const stat = await lstat(external.link_path).catch(() => undefined);
+    if (!stat?.isSymbolicLink()) {
+      issues.push({
+        level: "error",
+        code: "external-link-invalid",
+        message: `${external.agent}/${external.name} 的外部入口不再是软链接`,
+      });
+      continue;
+    }
+    const current = path.resolve(path.dirname(external.link_path), await readlink(external.link_path));
+    if (current !== path.resolve(external.path)) {
+      issues.push({
+        level: "error",
+        code: "external-link-changed",
+        message: `${external.agent}/${external.name} 的外部入口目标已经变化`,
+      });
+      continue;
+    }
+    const skillFile = await lstat(path.join(current, "SKILL.md")).catch(() => undefined);
+    if (!skillFile?.isFile()) {
+      issues.push({
+        level: "error",
+        code: "external-skill-missing",
+        message: `${external.agent}/${external.name} 的外部来源缺少 SKILL.md`,
+      });
+    }
+  }
   for (const [name, agent] of Object.entries(agents.agent)) {
     const stat = await lstat(agent.skills_dir).catch(() => undefined);
     if (stat?.isSymbolicLink()) {

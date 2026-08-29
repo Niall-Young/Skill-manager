@@ -13,10 +13,19 @@ export interface SkillConfig {
   requires?: string[];
 }
 
+export interface ExternalSkillConfig {
+  agent: string;
+  name: string;
+  link_path: string;
+  path: string;
+  owner: string;
+}
+
 export interface SkillsRegistry {
   version: number;
   source: Record<string, SourceConfig>;
   skill: Record<string, SkillConfig>;
+  external: Record<string, ExternalSkillConfig>;
 }
 
 export interface AgentConfig {

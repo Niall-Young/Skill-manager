@@ -1,5 +1,5 @@
 import path from "node:path";
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, readFile, readlink, writeFile } from "node:fs/promises";
 
 import { approveAgent, detectAgents } from "./agents.ts";
 import { buildAudit } from "./audit.ts";
@@ -7,7 +7,7 @@ import { runDoctor } from "./doctor.ts";
 import { initializeLibrary } from "./library.ts";
 import { addGitSource, fetchGitSource, updateGitSource } from "./git-source.ts";
 import { buildInventory } from "./inventory.ts";
-import { applyMigrationPlan, createMigrationPlan, rollbackMigration } from "./migration.ts";
+import { applyMigrationPlan, createMigrationPlan, finalizeMigration, rollbackMigration } from "./migration.ts";
 import { assertSkillDirectory, loadAgentsRegistry, loadSkillsRegistry, resolveSkillSource, saveSkillsRegistry } from "./registry.ts";
 import { applySyncPlan, buildSyncPlan } from "./sync.ts";
 
@@ -35,8 +35,9 @@ const HELP = `SkillManager — 从专门仓库按白名单分发 Skill
   skillmgr source add|list|fetch
   skillmgr skill add <source> <path>
   skillmgr target set|all|remove
+  skillmgr external trust|untrust
   skillmgr list|inventory|explain|plan|sync|audit|doctor
-  skillmgr migrate plan|apply|rollback
+  skillmgr migrate plan|apply|rollback|finalize
   skillmgr update [source]
 `;
 
@@ -85,6 +86,54 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       if (!registry.skill[skillName].agents?.length) throw new Error("Agent 白名单不能为空");
       await saveSkillsRegistry(library, registry);
       io.stdout(`已更新 ${skillName} 的 Agent 白名单`);
+      return 0;
+    }
+
+    if (argv[0] === "external" && argv[1] === "trust") {
+      const agentName = argv[2];
+      const skillName = argv[3];
+      const owner = flagValue(argv, "--owner");
+      if (!agentName || !skillName || !owner) {
+        throw new Error("用法：skillmgr external trust <agent> <skill> --owner <owner>");
+      }
+      const library = libraryPath(argv, io);
+      const registry = await loadSkillsRegistry(library);
+      const agents = await loadAgentsRegistry(io.home);
+      const agent = agents.agent[agentName];
+      if (!agent) throw new Error(`未登记 Agent：${agentName}`);
+      const linkPath = path.join(agent.skills_dir, skillName);
+      const stat = await lstat(linkPath).catch(() => undefined);
+      if (!stat?.isSymbolicLink()) throw new Error(`外部 Skill 入口不是软链接：${linkPath}`);
+      const target = path.resolve(path.dirname(linkPath), await readlink(linkPath));
+      const relativeToLibrary = path.relative(path.resolve(library), target);
+      if (relativeToLibrary === "" || (!relativeToLibrary.startsWith("..") && !path.isAbsolute(relativeToLibrary))) {
+        throw new Error(`${skillName} 已经指向 SkillLibrary，不应登记为外部 Skill`);
+      }
+      const skillFile = await lstat(path.join(target, "SKILL.md")).catch(() => undefined);
+      if (!skillFile?.isFile()) throw new Error(`外部 Skill 缺少 SKILL.md：${target}`);
+      registry.external[`${agentName}/${skillName}`] = {
+        agent: agentName,
+        name: skillName,
+        link_path: linkPath,
+        path: target,
+        owner,
+      };
+      await saveSkillsRegistry(library, registry);
+      io.stdout(`已登记外部 Skill：${agentName}/${skillName}`);
+      return 0;
+    }
+
+    if (argv[0] === "external" && argv[1] === "untrust") {
+      const agentName = argv[2];
+      const skillName = argv[3];
+      if (!agentName || !skillName) throw new Error("用法：skillmgr external untrust <agent> <skill>");
+      const library = libraryPath(argv, io);
+      const registry = await loadSkillsRegistry(library);
+      const id = `${agentName}/${skillName}`;
+      if (!registry.external[id]) throw new Error(`未登记外部 Skill：${id}`);
+      delete registry.external[id];
+      await saveSkillsRegistry(library, registry);
+      io.stdout(`已取消外部 Skill 登记：${id}`);
       return 0;
     }
 
@@ -150,7 +199,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       const library = libraryPath(argv, io);
       const migrationPlan = JSON.parse(await readFile(path.resolve(io.cwd, planFile), "utf8"));
       const agents = await loadAgentsRegistry(io.home);
-      io.stdout(JSON.stringify(await applyMigrationPlan(library, migrationPlan, agents), null, 2));
+      io.stdout(JSON.stringify(await applyMigrationPlan(io.home, library, migrationPlan, agents), null, 2));
       return 0;
     }
 
@@ -160,6 +209,15 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       const library = libraryPath(argv, io);
       await rollbackMigration(library, transactionId);
       io.stdout(`已回滚迁移：${transactionId}`);
+      return 0;
+    }
+
+    if (argv[0] === "migrate" && argv[1] === "finalize") {
+      const transactionId = argv[2];
+      if (!transactionId) throw new Error("用法：skillmgr migrate finalize <transaction-id>");
+      const library = libraryPath(argv, io);
+      await finalizeMigration(library, transactionId);
+      io.stdout(`已结束迁移并清理备份：${transactionId}`);
       return 0;
     }
 
