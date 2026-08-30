@@ -9,7 +9,8 @@ import { addGitSource, fetchGitSource, updateGitSource } from "./git-source.ts";
 import { buildInventory } from "./inventory.ts";
 import { applyMigrationPlan, createMigrationPlan, finalizeMigration, rollbackMigration } from "./migration.ts";
 import { assertSkillDirectory, loadAgentsRegistry, loadSkillsRegistry, resolveSkillSource, saveSkillsRegistry } from "./registry.ts";
-import { applySyncPlan, buildSyncPlan } from "./sync.ts";
+import { applySyncPlan, buildSyncPlan, recoverIncompleteSyncTransactions } from "./sync.ts";
+import { assertMigrationTransactionId, assertSafeSegment, childPath } from "./safety.ts";
 
 export interface CliIo {
   cwd: string;
@@ -58,6 +59,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       const library = libraryPath(argv, io);
       const registry = await loadSkillsRegistry(library);
       const agents = await loadAgentsRegistry(io.home);
+      if (argv[0] === "sync" && argv.includes("--apply")) {
+        await recoverIncompleteSyncTransactions(library, agents);
+      }
       const plan = await buildSyncPlan(library, registry, agents);
       if (argv[0] === "sync" && argv.includes("--apply")) {
         const summary = await applySyncPlan(plan);
@@ -79,6 +83,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       const skillName = argv[2];
       const agentList = argv[3];
       if (!skillName || !agentList) throw new Error("用法：skillmgr target set <skill> <agent,agent>");
+      assertSafeSegment(skillName, "Skill");
       const library = libraryPath(argv, io);
       const registry = await loadSkillsRegistry(library);
       if (!registry.skill[skillName]) throw new Error(`未登记 Skill：${skillName}`);
@@ -96,12 +101,14 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       if (!agentName || !skillName || !owner) {
         throw new Error("用法：skillmgr external trust <agent> <skill> --owner <owner>");
       }
+      assertSafeSegment(agentName, "Agent");
+      assertSafeSegment(skillName, "Skill");
       const library = libraryPath(argv, io);
       const registry = await loadSkillsRegistry(library);
       const agents = await loadAgentsRegistry(io.home);
       const agent = agents.agent[agentName];
       if (!agent) throw new Error(`未登记 Agent：${agentName}`);
-      const linkPath = path.join(agent.skills_dir, skillName);
+      const linkPath = childPath(agent.skills_dir, skillName, "外部 Skill 入口");
       const stat = await lstat(linkPath).catch(() => undefined);
       if (!stat?.isSymbolicLink()) throw new Error(`外部 Skill 入口不是软链接：${linkPath}`);
       const target = path.resolve(path.dirname(linkPath), await readlink(linkPath));
@@ -127,6 +134,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       const agentName = argv[2];
       const skillName = argv[3];
       if (!agentName || !skillName) throw new Error("用法：skillmgr external untrust <agent> <skill>");
+      assertSafeSegment(agentName, "Agent");
+      assertSafeSegment(skillName, "Skill");
       const library = libraryPath(argv, io);
       const registry = await loadSkillsRegistry(library);
       const id = `${agentName}/${skillName}`;
@@ -175,6 +184,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
       const agentsIndex = argv.indexOf("--agents");
       const skillName = nameIndex >= 0 ? argv[nameIndex + 1] : skillPath ? path.basename(skillPath) : undefined;
       if (!sourceName || !skillPath || !skillName) throw new Error("用法：skillmgr skill add <source> <path> [--name <name>] --agents <list>");
+      assertSafeSegment(sourceName, "source");
+      assertSafeSegment(skillName, "Skill");
       const library = libraryPath(argv, io);
       const registry = await loadSkillsRegistry(library);
       if (!registry.source[sourceName]) throw new Error(`不存在 source.${sourceName}`);
@@ -184,7 +195,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         agents: agentsIndex >= 0 ? argv[agentsIndex + 1]?.split(",").filter(Boolean) : undefined,
       };
       const resolved = resolveSkillSource(library, registry, skillName);
-      await assertSkillDirectory(skillName, resolved);
+      await assertSkillDirectory(skillName, resolved, library);
       if (!registry.skill[skillName].agents?.length && !registry.source[sourceName].default_agents?.length) {
         throw new Error(`${skillName} 必须指定 Agent 白名单`);
       }
@@ -206,8 +217,10 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     if (argv[0] === "migrate" && argv[1] === "rollback") {
       const transactionId = argv[2];
       if (!transactionId) throw new Error("用法：skillmgr migrate rollback <transaction-id>");
+      assertMigrationTransactionId(transactionId);
       const library = libraryPath(argv, io);
-      await rollbackMigration(library, transactionId);
+      const agents = await loadAgentsRegistry(io.home);
+      await rollbackMigration(library, transactionId, agents);
       io.stdout(`已回滚迁移：${transactionId}`);
       return 0;
     }
@@ -215,8 +228,10 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     if (argv[0] === "migrate" && argv[1] === "finalize") {
       const transactionId = argv[2];
       if (!transactionId) throw new Error("用法：skillmgr migrate finalize <transaction-id>");
+      assertMigrationTransactionId(transactionId);
       const library = libraryPath(argv, io);
-      await finalizeMigration(library, transactionId);
+      const agents = await loadAgentsRegistry(io.home);
+      await finalizeMigration(library, transactionId, agents);
       io.stdout(`已结束迁移并清理备份：${transactionId}`);
       return 0;
     }
@@ -349,8 +364,19 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
 
     if (argv[0] === "doctor") {
       const library = libraryPath(argv, io);
-      const registry = await loadSkillsRegistry(library);
-      const agents = await loadAgentsRegistry(io.home);
+      let registry;
+      let agents;
+      try {
+        registry = await loadSkillsRegistry(library);
+        agents = await loadAgentsRegistry(io.home);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        io.stdout(JSON.stringify({
+          status: "error",
+          issues: [{ level: "error", code: message.includes("名称必须") ? "invalid-name" : "invalid-config", message }],
+        }, null, 2));
+        return 1;
+      }
       const result = await runDoctor(library, registry, agents);
       io.stdout(JSON.stringify(result, null, 2));
       return result.status === "error" ? 1 : 0;

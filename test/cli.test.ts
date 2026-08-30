@@ -1,11 +1,186 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 import { runCli } from "../src/cli-app.ts";
+
+test("skill add rejects a name that is not a single safe path segment", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-unsafe-name-"));
+  const library = path.join(sandbox, "MySkills");
+  const errors: string[] = [];
+  const quiet = { cwd: sandbox, home: sandbox, stdout: () => undefined, stderr: (line: string) => errors.push(line) };
+  await runCli(["library", "init", library], quiet);
+  await mkdir(path.join(library, "owned", "expert"), { recursive: true });
+  await writeFile(path.join(library, "owned", "expert", "SKILL.md"), "---\nname: expert\ndescription: Expert.\n---\n");
+
+  const exitCode = await runCli(
+    ["skill", "add", "own", "expert", "--name", "../outside", "--agents", "codex", "--library", library],
+    quiet,
+  );
+
+  assert.equal(exitCode, 1);
+  assert.match(errors.join("\n"), /名称.*单层路径/);
+  assert.doesNotMatch(await readFile(path.join(library, "skills.toml"), "utf8"), /outside/);
+});
+
+test("plan rejects an unsafe skill name loaded from TOML before creating an escaped link", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-unsafe-registry-"));
+  const library = path.join(sandbox, "MySkills");
+  const errors: string[] = [];
+  const quiet = { cwd: sandbox, home: sandbox, stdout: () => undefined, stderr: (line: string) => errors.push(line) };
+  await runCli(["library", "init", library], quiet);
+  await mkdir(path.join(library, "owned", "expert"), { recursive: true });
+  await writeFile(path.join(library, "owned", "expert", "SKILL.md"), "---\nname: expert\ndescription: Expert.\n---\n");
+  await writeFile(
+    path.join(library, "skills.toml"),
+    `version = 1\n[source.own]\nkind = "owned"\npath = "owned"\n[skill."../../escaped"]\nfrom = "own"\npath = "expert"\nagents = ["codex"]\n`,
+  );
+  await mkdir(path.join(sandbox, ".config", "skillmanager"), { recursive: true });
+  await writeFile(
+    path.join(sandbox, ".config", "skillmanager", "agents.toml"),
+    `version = 1\n[agent.codex]\nskills_dir = "${path.join(sandbox, ".codex", "skills")}"\napproved = true\n`,
+  );
+
+  const exitCode = await runCli(["plan", "--library", library], quiet);
+
+  assert.equal(exitCode, 1);
+  assert.match(errors.join("\n"), /名称.*单层路径/);
+
+  const doctorOutput: string[] = [];
+  assert.equal(
+    await runCli(["doctor", "--library", library], { ...quiet, stdout: (line) => doctorOutput.push(line) }),
+    1,
+  );
+  assert.equal(JSON.parse(doctorOutput.join("\n")).issues[0].code, "invalid-name");
+});
+
+test("sync rejects corrupt or forged managed state instead of treating it as empty", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-corrupt-state-"));
+  const library = path.join(sandbox, "MySkills");
+  const errors: string[] = [];
+  const quiet = { cwd: sandbox, home: sandbox, stdout: () => undefined, stderr: (line: string) => errors.push(line) };
+  await runCli(["library", "init", library], quiet);
+  await mkdir(path.join(sandbox, ".config", "skillmanager"), { recursive: true });
+  await writeFile(
+    path.join(sandbox, ".config", "skillmanager", "agents.toml"),
+    `version = 1\n[agent.codex]\nskills_dir = "${path.join(sandbox, ".codex", "skills")}"\napproved = true\n`,
+  );
+  await writeFile(path.join(library, ".skillmanager", "managed-links.json"), "{not-json\n");
+
+  assert.equal(await runCli(["plan", "--library", library], quiet), 1);
+  assert.match(errors.join("\n"), /受管状态.*损坏/);
+  const doctorOutput: string[] = [];
+  assert.equal(
+    await runCli(["doctor", "--library", library], { ...quiet, stdout: (line) => doctorOutput.push(line) }),
+    1,
+  );
+  assert.equal(JSON.parse(doctorOutput.join("\n")).issues[0].code, "invalid-managed-state");
+
+  const outsideTarget = path.join(sandbox, "outside-target");
+  const outsideLink = path.join(sandbox, "outside-link");
+  await mkdir(outsideTarget, { recursive: true });
+  await symlink(outsideTarget, outsideLink, "dir");
+  await writeFile(
+    path.join(library, ".skillmanager", "managed-links.json"),
+    JSON.stringify({ version: 1, links: [{ agent: "codex", skill: "expert", linkPath: outsideLink, targetPath: outsideTarget }] }),
+  );
+  errors.length = 0;
+
+  assert.equal(await runCli(["sync", "--library", library, "--apply"], quiet), 1);
+  assert.match(errors.join("\n"), /受管链接.*Agent Skill 目录/);
+  assert.equal(await readlink(outsideLink), outsideTarget);
+});
+
+test("plan rejects a Skill root symlink that resolves outside SkillLibrary", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-source-symlink-"));
+  const library = path.join(sandbox, "MySkills");
+  const errors: string[] = [];
+  const quiet = { cwd: sandbox, home: sandbox, stdout: () => undefined, stderr: (line: string) => errors.push(line) };
+  await runCli(["library", "init", library], quiet);
+  const outside = path.join(sandbox, "outside-skill");
+  await mkdir(outside, { recursive: true });
+  await writeFile(path.join(outside, "SKILL.md"), "---\nname: escaped\ndescription: Escaped.\n---\n");
+  await symlink(outside, path.join(library, "owned", "escaped"), "dir");
+  await writeFile(
+    path.join(library, "skills.toml"),
+    `version = 1\n[source.own]\nkind = "owned"\npath = "owned"\n[skill.escaped]\nfrom = "own"\npath = "escaped"\nagents = ["codex"]\n`,
+  );
+  await mkdir(path.join(sandbox, ".config", "skillmanager"), { recursive: true });
+  await writeFile(
+    path.join(sandbox, ".config", "skillmanager", "agents.toml"),
+    `version = 1\n[agent.codex]\nskills_dir = "${path.join(sandbox, ".codex", "skills")}"\napproved = true\n`,
+  );
+
+  assert.equal(await runCli(["plan", "--library", library], quiet), 1);
+  assert.match(errors.join("\n"), /Skill 根目录.*软链接/);
+});
+
+test("migration rollback rejects a transaction ID that is not generated by SkillManager", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-transaction-id-"));
+  const library = path.join(sandbox, "MySkills");
+  const errors: string[] = [];
+  const quiet = { cwd: sandbox, home: sandbox, stdout: () => undefined, stderr: (line: string) => errors.push(line) };
+  await runCli(["library", "init", library], quiet);
+
+  assert.equal(await runCli(["migrate", "rollback", "migration-/../../outside", "--library", library], quiet), 1);
+  assert.match(errors.join("\n"), /事务 ID 格式无效/);
+});
+
+test("doctor reports a prepared transaction that may need recovery", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-incomplete-transaction-"));
+  const library = path.join(sandbox, "MySkills");
+  const output: string[] = [];
+  const quiet = { cwd: sandbox, home: sandbox, stdout: (line: string) => output.push(line), stderr: () => undefined };
+  await runCli(["library", "init", library], quiet);
+  await mkdir(path.join(sandbox, ".config", "skillmanager"), { recursive: true });
+  await writeFile(
+    path.join(sandbox, ".config", "skillmanager", "agents.toml"),
+    `version = 1\n[agent.codex]\nskills_dir = "${path.join(sandbox, ".codex", "skills")}"\napproved = true\n`,
+  );
+  await writeFile(
+    path.join(library, ".skillmanager", "transactions", "2026-08-30T00-00-00-000Z.json"),
+    JSON.stringify({ version: 1, transactionId: "2026-08-30T00-00-00-000Z", status: "prepared", actions: [] }),
+  );
+
+  assert.equal(await runCli(["doctor", "--library", library], quiet), 1);
+  const result = JSON.parse(output.at(-1)!);
+  assert.equal(result.issues.some((issue: { code: string }) => issue.code === "incomplete-transaction"), true);
+
+  output.length = 0;
+  assert.equal(await runCli(["sync", "--library", library, "--apply"], quiet), 0);
+  output.length = 0;
+  assert.equal(await runCli(["doctor", "--library", library], quiet), 0);
+});
+
+test("source add restores registry and checkout when lock persistence fails", async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-source-atomic-"));
+  const library = path.join(sandbox, "MySkills");
+  const upstream = path.join(sandbox, "upstream");
+  const errors: string[] = [];
+  const quiet = { cwd: sandbox, home: sandbox, stdout: () => undefined, stderr: (line: string) => errors.push(line) };
+  await runCli(["library", "init", library], quiet);
+  await mkdir(path.join(upstream, "skills", "expert"), { recursive: true });
+  await writeFile(path.join(upstream, "skills", "expert", "SKILL.md"), "---\nname: expert\ndescription: Expert.\n---\n");
+  assert.equal(spawnSync("git", ["init", "-b", "main", upstream]).status, 0);
+  assert.equal(spawnSync("git", ["-C", upstream, "add", "."]).status, 0);
+  assert.equal(
+    spawnSync("git", ["-C", upstream, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"]).status,
+    0,
+  );
+  const originalRegistry = await readFile(path.join(library, "skills.toml"), "utf8");
+  await rm(path.join(library, "skills.lock"));
+  await mkdir(path.join(library, "skills.lock"));
+
+  assert.equal(
+    await runCli(["source", "add", upstream, "--name", "example", "--library", library], quiet),
+    1,
+  );
+  assert.equal(await readFile(path.join(library, "skills.toml"), "utf8"), originalRegistry);
+  await assert.rejects(readFile(path.join(library, "sources", "example", ".git", "HEAD"), "utf8"));
+});
 
 test("library init creates a dedicated skill repository skeleton", async () => {
   const sandbox = await mkdtemp(path.join(tmpdir(), "skillmanager-init-"));

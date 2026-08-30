@@ -2,6 +2,23 @@
   "name": "skillmanager",
   "version": "0.1.0",
   "description": "Distribute skills from one dedicated library to approved AI agents.",
+  "keywords": [
+    "agent-skills",
+    "ai-agents",
+    "codex",
+    "claude-code",
+    "skill-manager"
+  ],
+  "author": "Niall-Young",
+  "license": "MIT",
+  "homepage": "https://github.com/Niall-Young/Skill-manager#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Niall-Young/Skill-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Niall-Young/Skill-manager/issues"
+  },
   "type": "module",
   "bin": {
     "skillmgr": "dist/cli.js"
@@ -28,5 +45,8 @@
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   },
-  "packageManager": "pnpm@11.1.2"
+  "packageManager": "pnpm@11.1.2",
+  "publishConfig": {
+    "access": "public"
+  }
 }

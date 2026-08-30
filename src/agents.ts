@@ -1,8 +1,9 @@
-import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse, stringify } from "smol-toml";
 
 import type { AgentConfig, AgentsRegistry } from "./model.ts";
+import { assertSafeSegment, atomicWriteFile } from "./safety.ts";
 
 const KNOWN_AGENTS: Array<{ id: string; homeDir: string; skillsDir: string; capabilities: string[] }> = [
   { id: "codex", homeDir: ".codex", skillsDir: ".codex/skills", capabilities: ["image_gen", "view_image", "codex-plugins"] },
@@ -54,6 +55,7 @@ export async function detectAgents(home: string): Promise<DetectedAgent[]> {
 }
 
 export async function approveAgent(home: string, agentId: string): Promise<DetectedAgent> {
+  assertSafeSegment(agentId, "Agent");
   const detected = await detectAgents(home);
   const candidate = detected.find((agent) => agent.id === agentId);
   if (!candidate) throw new Error(`未检测到 Agent：${agentId}`);
@@ -66,8 +68,6 @@ export async function approveAgent(home: string, agentId: string): Promise<Detec
   };
   const registry: AgentsRegistry = { version: 1, agent: current };
   await mkdir(path.dirname(filePath), { recursive: true });
-  const temporary = `${filePath}.tmp`;
-  await writeFile(temporary, stringify(registry as unknown as Record<string, unknown>), "utf8");
-  await rename(temporary, filePath);
+  await atomicWriteFile(filePath, stringify(registry as unknown as Record<string, unknown>));
   return { ...candidate, approved: true };
 }

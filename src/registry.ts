@@ -1,8 +1,9 @@
-import { lstat, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { parse, stringify } from "smol-toml";
 
 import type { AgentsRegistry, SkillsRegistry } from "./model.ts";
+import { assertInside, assertSafeSegment, atomicWriteFile } from "./safety.ts";
 
 function asObject(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -36,6 +37,7 @@ export async function loadSkillsRegistry(library: string): Promise<SkillsRegistr
   const external: SkillsRegistry["external"] = {};
 
   for (const [name, value] of Object.entries(sourcesRaw)) {
+    assertSafeSegment(name, "source");
     const entry = asObject(value, `source.${name}`);
     if (entry.kind !== "owned" && entry.kind !== "git") {
       throw new Error(`source.${name}.kind 必须是 owned 或 git`);
@@ -50,6 +52,7 @@ export async function loadSkillsRegistry(library: string): Promise<SkillsRegistr
   }
 
   for (const [name, value] of Object.entries(skillsRaw)) {
+    assertSafeSegment(name, "Skill");
     const entry = asObject(value, `skill.${name}`);
     if (typeof entry.from !== "string" || typeof entry.path !== "string") {
       throw new Error(`skill.${name} 必须包含 from 和 path`);
@@ -60,6 +63,10 @@ export async function loadSkillsRegistry(library: string): Promise<SkillsRegistr
       agents: asStringArray(entry.agents, `skill.${name}.agents`),
       requires: asStringArray(entry.requires, `skill.${name}.requires`),
     };
+    assertSafeSegment(skill[name].from, `skill.${name}.from`);
+    for (const agent of skill[name].agents ?? []) {
+      if (agent !== "*") assertSafeSegment(agent, `skill.${name}.agents`);
+    }
   }
 
   for (const [id, value] of Object.entries(externalRaw)) {
@@ -80,6 +87,11 @@ export async function loadSkillsRegistry(library: string): Promise<SkillsRegistr
       path: path.resolve(entry.path),
       owner: entry.owner,
     };
+    assertSafeSegment(external[id].agent, `external.${id}.agent`);
+    assertSafeSegment(external[id].name, `external.${id}.name`);
+    if (id !== `${external[id].agent}/${external[id].name}`) {
+      throw new Error(`external.${id} 的 ID 必须匹配 agent/name`);
+    }
   }
 
   return { version: Number(root.version ?? 1), source, skill, external };
@@ -99,9 +111,7 @@ function withoutUndefined(value: unknown): unknown {
 
 export async function saveSkillsRegistry(library: string, registry: SkillsRegistry): Promise<void> {
   const target = path.join(library, "skills.toml");
-  const temporary = `${target}.tmp`;
-  await writeFile(temporary, stringify(withoutUndefined(registry) as Record<string, unknown>), "utf8");
-  await rename(temporary, target);
+  await atomicWriteFile(target, stringify(withoutUndefined(registry) as Record<string, unknown>));
 }
 
 export interface SkillsLock {
@@ -123,9 +133,7 @@ export async function loadSkillsLock(library: string): Promise<SkillsLock> {
 
 export async function saveSkillsLock(library: string, lock: SkillsLock): Promise<void> {
   const target = path.join(library, "skills.lock");
-  const temporary = `${target}.tmp`;
-  await writeFile(temporary, stringify(lock as unknown as Record<string, unknown>), "utf8");
-  await rename(temporary, target);
+  await atomicWriteFile(target, stringify(lock as unknown as Record<string, unknown>));
 }
 
 export async function loadAgentsRegistry(home: string): Promise<AgentsRegistry> {
@@ -136,6 +144,7 @@ export async function loadAgentsRegistry(home: string): Promise<AgentsRegistry> 
   const agent: AgentsRegistry["agent"] = {};
 
   for (const [name, value] of Object.entries(agentsRaw)) {
+    assertSafeSegment(name, "Agent");
     const entry = asObject(value, `agent.${name}`);
     if (typeof entry.skills_dir !== "string" || typeof entry.approved !== "boolean") {
       throw new Error(`agent.${name} 必须包含 skills_dir 和 approved`);
@@ -168,7 +177,11 @@ export function resolveSkillSource(library: string, registry: SkillsRegistry, sk
   return resolved;
 }
 
-export async function assertSkillDirectory(skillName: string, skillPath: string): Promise<void> {
+export async function assertSkillDirectory(skillName: string, skillPath: string, library?: string): Promise<void> {
+  const rootStat = await lstat(skillPath).catch(() => undefined);
+  if (rootStat?.isSymbolicLink()) throw new Error(`skill.${skillName} 的 Skill 根目录不能是软链接`);
+  if (!rootStat?.isDirectory()) throw new Error(`skill.${skillName} 不是有效目录：${skillPath}`);
+  if (library) assertInside(await realpath(library), await realpath(skillPath), `skill.${skillName} 的真实路径`);
   const stat = await lstat(path.join(skillPath, "SKILL.md")).catch(() => undefined);
   if (!stat?.isFile()) throw new Error(`skill.${skillName} 缺少 SKILL.md：${skillPath}`);
 }

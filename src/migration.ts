@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, readFile, readlink, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { cp, lstat, mkdir, readFile, readlink, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { AgentsRegistry } from "./model.ts";
@@ -7,6 +7,7 @@ import type { SkillsRegistry } from "./model.ts";
 import { buildCodexOwnedInventory, buildExternalLinkInventory, type InventoryItem } from "./inventory.ts";
 import { loadSkillsRegistry, resolveSkillSource, saveSkillsRegistry } from "./registry.ts";
 import { applySyncPlan, buildSyncPlan } from "./sync.ts";
+import { assertInside, assertMigrationTransactionId, atomicWriteFile, childPath, isInside } from "./safety.ts";
 
 export interface MigrationCandidate {
   id: string;
@@ -47,11 +48,6 @@ async function hashDirectory(root: string): Promise<string> {
   }
   await visit(root);
   return hash.digest("hex");
-}
-
-function isInside(parent: string, child: string): boolean {
-  const relative = path.relative(path.resolve(parent), path.resolve(child));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 export async function createMigrationPlan(
@@ -138,6 +134,7 @@ export async function createMigrationPlan(
 interface MigrationJournal {
   version: 1;
   transactionId: string;
+  status?: "prepared" | "committed" | "rolled-back";
   previousRegistry: string;
   adopted: Array<{ destination: string; backups: Array<{ original: string; backup: string }> }>;
   relinked: Array<{ original: string; backup: string; target: string }>;
@@ -149,6 +146,60 @@ interface MigrationJournal {
 interface ManagedLinksState {
   version: number;
   links: Array<{ linkPath: string; targetPath: string }>;
+}
+
+function validateMigrationJournal(
+  library: string,
+  transactionId: string,
+  journal: MigrationJournal,
+  agents: AgentsRegistry,
+): void {
+  if (
+    journal.version !== 1
+    || journal.transactionId !== transactionId
+    || typeof journal.previousRegistry !== "string"
+    || !Array.isArray(journal.adopted)
+    || !Array.isArray(journal.relinked)
+    || !Array.isArray(journal.retired)
+    || !Array.isArray(journal.pruned)
+    || !Array.isArray(journal.rootAliases)
+  ) {
+    throw new Error("迁移事务日志格式无效");
+  }
+  const backupRoot = path.join(library, ".skillmanager", "migration-backups", transactionId);
+  const ownedRoot = path.join(library, "owned");
+  const assertAgentEntry = (candidate: string): void => {
+    const valid = Object.values(agents.agent).some((agent) => {
+      const relative = path.relative(path.resolve(agent.skills_dir), path.resolve(candidate));
+      return relative !== "" && !relative.includes(path.sep) && relative !== "." && relative !== "..";
+    });
+    if (!valid) throw new Error(`迁移日志包含 Agent Skill 目录以外的入口：${candidate}`);
+  };
+  const assertBackup = (candidate: string): void => assertInside(backupRoot, candidate, "迁移备份");
+
+  for (const item of journal.adopted) {
+    assertInside(ownedRoot, item.destination, "迁移目标");
+    if (!Array.isArray(item.backups)) throw new Error("迁移事务日志格式无效");
+    for (const backup of item.backups) {
+      assertAgentEntry(backup.original);
+      assertBackup(backup.backup);
+    }
+  }
+  for (const item of journal.relinked) {
+    assertAgentEntry(item.original);
+    assertBackup(item.backup);
+    assertInside(library, item.target, "relink 目标");
+  }
+  for (const item of [...journal.retired, ...journal.pruned]) {
+    assertAgentEntry(item.original);
+    assertBackup(item.backup);
+  }
+  for (const alias of journal.rootAliases) {
+    if (!Object.values(agents.agent).some((agent) => path.resolve(agent.skills_dir) === path.resolve(alias.original))) {
+      throw new Error(`迁移日志包含未登记的 Agent Skill 根目录：${alias.original}`);
+    }
+    assertBackup(alias.backup);
+  }
 }
 
 export async function applyMigrationPlan(
@@ -207,7 +258,7 @@ export async function applyMigrationPlan(
     if (new Set(group.map((item) => item.digest)).size > 1) throw new Error(`${name} 存在同名不同内容，不能自动迁移`);
   }
 
-  const transactionId = `migration-${new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-")}`;
+  const transactionId = `migration-${new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-")}-${randomUUID()}`;
   const previousRegistry = await readFile(path.join(library, "skills.toml"), "utf8");
   const registry: SkillsRegistry = await loadSkillsRegistry(library);
   for (const candidate of relinked) {
@@ -224,6 +275,7 @@ export async function applyMigrationPlan(
   const journal: MigrationJournal = {
     version: 1,
     transactionId,
+    status: "prepared",
     previousRegistry,
     adopted: [],
     relinked: [],
@@ -232,6 +284,21 @@ export async function applyMigrationPlan(
     rootAliases: [],
   };
   const backupRoot = path.join(library, ".skillmanager", "migration-backups", transactionId);
+  const journalPath = path.join(library, ".skillmanager", "transactions", `${transactionId}.json`);
+  const libraryDevice = (await stat(library)).dev;
+  for (const mutablePath of [
+    ...selected.map((candidate) => candidate.sourcePath),
+    ...aliasesToSplit.map((alias) => alias.path),
+  ]) {
+    if ((await lstat(mutablePath)).dev !== libraryDevice) {
+      throw new Error(`迁移源与 SkillLibrary 位于不同文件系统，无法保证原子迁移：${mutablePath}`);
+    }
+  }
+  await atomicWriteFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
+
+  const persistJournal = async (): Promise<void> => {
+    await atomicWriteFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
+  };
 
   try {
     for (const alias of aliasesToSplit) {
@@ -243,6 +310,7 @@ export async function applyMigrationPlan(
       await rename(alias.path, backup);
       await mkdir(alias.path, { recursive: true });
       journal.rootAliases.push({ original: alias.path, backup });
+      await persistJournal();
     }
 
     for (const [name, group] of grouped) {
@@ -257,6 +325,7 @@ export async function applyMigrationPlan(
         backups.push({ original: candidate.sourcePath, backup });
       }
       journal.adopted.push({ destination, backups });
+      await persistJournal();
       registry.skill[name] = {
         from: "own",
         path: name,
@@ -273,6 +342,7 @@ export async function applyMigrationPlan(
         backup,
         target: resolveSkillSource(library, registry, candidate.name),
       });
+      await persistJournal();
       registry.skill[candidate.name].agents = [...new Set(candidate.agents)];
     }
 
@@ -285,6 +355,7 @@ export async function applyMigrationPlan(
         backup,
         replacementPath: candidate.replacement!.path,
       });
+      await persistJournal();
     }
 
     for (const candidate of pruned) {
@@ -292,15 +363,14 @@ export async function applyMigrationPlan(
       await mkdir(path.dirname(backup), { recursive: true });
       await rename(candidate.sourcePath, backup);
       journal.pruned.push({ original: candidate.sourcePath, backup, target: candidate.resolvedPath });
+      await persistJournal();
     }
 
     await saveSkillsRegistry(library, registry);
     const syncPlan = await buildSyncPlan(library, registry, agentsRegistry);
     await applySyncPlan(syncPlan);
-    await writeFile(
-      path.join(library, ".skillmanager", "transactions", `${transactionId}.json`),
-      `${JSON.stringify(journal, null, 2)}\n`,
-    );
+    journal.status = "committed";
+    await persistJournal();
     return {
       transactionId,
       adopted: grouped.size,
@@ -309,7 +379,7 @@ export async function applyMigrationPlan(
       pruned: journal.pruned.length,
     };
   } catch (error) {
-    await writeFile(path.join(library, "skills.toml"), previousRegistry, "utf8");
+    await atomicWriteFile(path.join(library, "skills.toml"), previousRegistry);
     for (const item of journal.relinked.reverse()) {
       await rm(item.original, { recursive: true, force: true });
       await rename(item.backup, item.original).catch(() => undefined);
@@ -333,18 +403,24 @@ export async function applyMigrationPlan(
       await rm(alias.original, { recursive: true, force: true });
       await rename(alias.backup, alias.original).catch(() => undefined);
     }
+    journal.status = "rolled-back";
+    await persistJournal().catch(() => undefined);
     throw error;
   }
 }
 
-export async function rollbackMigration(library: string, transactionId: string): Promise<void> {
-  if (!transactionId.startsWith("migration-")) throw new Error("只允许回滚 migration 事务");
+export async function rollbackMigration(
+  library: string,
+  transactionId: string,
+  agents: AgentsRegistry,
+): Promise<void> {
+  assertMigrationTransactionId(transactionId);
   const journalPath = path.join(library, ".skillmanager", "transactions", `${transactionId}.json`);
   const journal = JSON.parse(await readFile(journalPath, "utf8")) as MigrationJournal & {
     rolledBackAt?: string;
     finalizedAt?: string;
   };
-  if (journal.transactionId !== transactionId) throw new Error("迁移事务 ID 不匹配");
+  validateMigrationJournal(library, transactionId, journal, agents);
   if (journal.rolledBackAt) throw new Error(`迁移事务已经回滚：${journal.rolledBackAt}`);
   if (journal.finalizedAt) throw new Error(`迁移事务已经结束：${journal.finalizedAt}`);
   journal.relinked ??= [];
@@ -426,7 +502,7 @@ export async function rollbackMigration(library: string, transactionId: string):
     await rm(alias.original, { recursive: true, force: true });
     await rename(alias.backup, alias.original);
   }
-  await writeFile(path.join(library, "skills.toml"), journal.previousRegistry, "utf8");
+  await atomicWriteFile(path.join(library, "skills.toml"), journal.previousRegistry);
 
   if (managedState) {
     const removedTargets = new Set(journal.adopted.map((item) => item.destination));
@@ -434,21 +510,27 @@ export async function rollbackMigration(library: string, transactionId: string):
     managedState.links = managedState.links.filter(
       (link) => !removedTargets.has(link.targetPath) && !restoredPaths.has(link.linkPath),
     );
-    await writeFile(managedStatePath, `${JSON.stringify(managedState, null, 2)}\n`, "utf8");
+    await atomicWriteFile(managedStatePath, `${JSON.stringify(managedState, null, 2)}\n`);
   }
 
   journal.rolledBackAt = new Date().toISOString();
-  await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  journal.status = "rolled-back";
+  await atomicWriteFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
 }
 
-export async function finalizeMigration(library: string, transactionId: string): Promise<void> {
-  if (!transactionId.startsWith("migration-")) throw new Error("只允许结束 migration 事务");
+export async function finalizeMigration(
+  library: string,
+  transactionId: string,
+  agents: AgentsRegistry,
+): Promise<void> {
+  assertMigrationTransactionId(transactionId);
   const journalPath = path.join(library, ".skillmanager", "transactions", `${transactionId}.json`);
   const journal = JSON.parse(await readFile(journalPath, "utf8")) as MigrationJournal & {
     rolledBackAt?: string;
     finalizedAt?: string;
   };
-  if (journal.transactionId !== transactionId) throw new Error("迁移事务 ID 不匹配");
+  validateMigrationJournal(library, transactionId, journal, agents);
+  if (journal.status === "prepared") throw new Error("迁移事务尚未完成，请先回滚而不是结束迁移");
   if (journal.rolledBackAt) throw new Error(`迁移事务已经回滚：${journal.rolledBackAt}`);
   if (journal.finalizedAt) throw new Error(`迁移事务已经结束：${journal.finalizedAt}`);
   journal.relinked ??= [];
@@ -509,5 +591,5 @@ export async function finalizeMigration(library: string, transactionId: string):
   }
   await rm(backupRoot, { recursive: true, force: true });
   journal.finalizedAt = new Date().toISOString();
-  await writeFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  await atomicWriteFile(journalPath, `${JSON.stringify(journal, null, 2)}\n`);
 }
