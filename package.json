@@ -1,5 +1,5 @@
 {
-  "name": "skillmanager",
+  "name": "@niallayoung/skillmanager",
   "version": "0.1.0",
   "description": "Distribute skills from one dedicated library to approved AI agents.",
   "keywords": [
