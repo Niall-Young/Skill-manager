@@ -47,10 +47,10 @@ SkillManager 把 Skill 的“原件”和 Agent 的“使用入口”分开：�
 
 #### npm 安装
 
-`skillmanager` 首次发布到 npm 后，可全局安装并使用 `skillmgr`：
+安装 npm 包后，可全局使用 `skillmgr`：
 
 ```sh
-npm install --global skillmanager
+npm install --global @niallayoung/skillmanager
 skillmgr --help
 ```
 
@@ -222,10 +222,10 @@ For example, “I am Codex” can use `agents = ["codex"]`, while a portable “
 
 #### Install from npm
 
-After the first npm release of `skillmanager`, install it globally and use the `skillmgr` command:
+Install the npm package globally, then use the `skillmgr` command:
 
 ```sh
-npm install --global skillmanager
+npm install --global @niallayoung/skillmanager
 skillmgr --help
 ```
 
