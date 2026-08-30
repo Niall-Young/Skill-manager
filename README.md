@@ -1,6 +1,12 @@
 # SkillManager
 
-Distribute personal global Agent Skills from one dedicated library with explicit allowlists.
+在一个独立仓库中管理 Agent Skills，并按白名单安全分发给 Codex、Claude Code、Gemini 等本地 AI Agent。
+
+Manage Agent Skills in one dedicated repository and safely distribute them to local AI agents with explicit allowlists.
+
+[![npm](https://img.shields.io/npm/v/@niallayoung/skillmanager)](https://www.npmjs.com/package/@niallayoung/skillmanager)
+[![CI](https://github.com/Niall-Young/Skill-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/Niall-Young/Skill-manager/actions/workflows/ci.yml)
+[![MIT License](https://img.shields.io/npm/l/@niallayoung/skillmanager)](LICENSE)
 
 [中文](#中文) | [English](#english)
 
@@ -11,162 +17,182 @@ Distribute personal global Agent Skills from one dedicated library with explicit
 
 ### 项目简介
 
-SkillManager 把 Skill 的“原件”和 Agent 的“使用入口”分开：原件统一放在独立的 `MySkills` 仓库，Codex、Claude Code、Qoder CN、Kimi Code、Gemini 等 Agent 的全局 Skill 目录只接收按白名单生成的软链接。项目级 Skill、Plugin Skill 和 Agent 系统 Skill 不属于这个分发流程。
+当你同时使用多个 AI 编程工具，同一份 Skill 往往会散落在不同的全局目录里：改了一份，其他副本不会更新；哪些 Agent 能使用它，也很难说清楚。
 
-当前版本是面向单机的 CLI v0.1。它不会自动改动你现有的全局 Skill；迁移必须先生成计划，再把候选项明确标记为 `adopt`、`relink`、`retire` 或 `prune`，或把需要取消的整目录别名标记为 `split`。
+SkillManager 提供一个简单规则：
 
-最简单的判断方式是先分清“谁拥有它”：
+```text
+~/MySkills（唯一原件）
+        │
+        ├── skills.toml（分发白名单）
+        │
+        └── SkillManager
+              ├──→ ~/.codex/skills/<skill>
+              ├──→ ~/.claude/skills/<skill>
+              └──→ 其他已批准 Agent 的 Skill 目录
+```
 
-| Skill 类型 | 原件放在哪里 | SkillManager 怎么处理 |
-| --- | --- | --- |
-| 个人、可跨 Agent 使用 | 独立的 `~/MySkills` | 按 Agent 白名单分发软链接 |
-| 只属于某个项目 | 该项目自己的 Skill 目录 | 不迁移；显式登记后只审计入口 |
-| Plugin / System / Runtime 提供 | 原 Agent 生态管理的位置 | 只读识别，绝不复制、迁移或链接 |
+Agent 目录里只有指向原件的软链接。你只维护一份 Skill，并明确决定它能分发给谁。
 
-所以“我是 Codex”可以设为 `agents = ["codex"]`；“我是专家”可以设为 `agents = ["*"]`。后者也不会盲目发给所有目录，只会发给你已经批准、且具备所需能力的 Agent。
+当前版本为本地 CLI `v0.1.0`。它不会自动接管现有 Skill，也不会覆盖真实目录或未知软链接；所有迁移都必须先生成计划，再由你明确选择动作。
 
 ### 核心能力
 
-- 初始化独立 `MySkills` Git 仓库，不把任何 Agent 目录当作真源。
-- 使用 `skills.toml` 为每个 Skill 指定 Agent 白名单，`["*"]` 仅覆盖已批准且能力兼容的 Agent。
-- 从本地或远程 Git 仓库检出第三方 Skill，并在 `skills.lock` 中固定 commit。
-- 识别 Codex System 与当前启用 Plugin 的 Skill，只读展示、不迁移。
-- 自动识别 `.agents` 安装器和 Aily Runtime 的外部 Skill；项目链接可显式登记为外部所有。
-- 通过预写事务日志创建、改指向和移除逐 Skill 链接；失败会回滚，异常中断会由 `doctor` 报告。只有旧目标仍与受管记录一致且位于 SkillLibrary 内的链接才能安全改指向，真实目录、未知链接和整目录别名会成为冲突。
-- 审计遗留 Skill，支持迁入、换链、退役、回滚和验收后清理备份。
-- 附带轻量自然语言入口 [`skills/skillmanager`](skills/skillmanager/SKILL.md)。
+- **一份原件**：个人 Skill 统一保存在独立的 `~/MySkills` Git 仓库。
+- **明确授权**：每个 Skill 使用 Agent 白名单；`["*"]` 也只覆盖已批准且能力兼容的 Agent。
+- **安全同步**：先 `plan` 预览，再 `sync --apply`；写入带事务记录，失败可回滚。
+- **第三方来源**：支持本地或远程 Git 仓库，并在 `skills.lock` 中固定 commit。
+- **存量迁移**：审计旧目录，支持迁入、换链、退役、回滚和验收后清理备份。
+- **尊重所有权**：项目级、Plugin、System 和 Runtime Skill 只读识别，不擅自搬运。
+
+内置识别：Codex、Claude Code、Qoder CN、Kimi Code、Gemini、Kiro、Qwen、Roo Code、Continue、CodeBuddy、WorkBuddy 和 AiderDesk。
 
 ### 快速开始
 
-#### 环境要求
+#### 1. 安装
 
-- Node.js 22 或更高版本
-- pnpm 11
-- Git
-- macOS 或其他支持目录软链接的系统
-
-#### npm 安装
-
-`skillmanager` 首次发布到 npm 后，可全局安装并使用 `skillmgr`：
+需要 Node.js 22+、Git，以及支持目录软链接的系统。
 
 ```sh
-npm install --global skillmanager
+npm install --global @niallayoung/skillmanager
 skillmgr --help
 ```
 
-#### 从源码安装与构建
+如果 npm 镜像还没有同步最新版本，可临时使用官方 registry：
+
+```sh
+npm install --global @niallayoung/skillmanager --registry=https://registry.npmjs.org/
+```
+
+#### 2. 初始化 SkillLibrary
+
+```sh
+skillmgr library init ~/MySkills
+skillmgr agent detect --json
+skillmgr agent approve codex
+```
+
+把最后一行的 `codex` 换成你检测到并希望授权的 Agent。`agent detect` 只读；只有 `agent approve` 会把批准信息写入 `~/.config/skillmanager/agents.toml`。
+
+#### 3. 添加第一份 Skill
+
+```sh
+mkdir -p ~/MySkills/owned/hello
+```
+
+创建 `~/MySkills/owned/hello/SKILL.md`：
+
+```markdown
+---
+name: hello
+description: 用一句友好的话向用户问好
+---
+
+# Hello
+
+用简洁、自然的语言向用户问好。
+```
+
+登记它，并只授权给 Codex：
+
+```sh
+skillmgr skill add own hello --name hello --agents codex
+```
+
+#### 4. 预览并同步
+
+```sh
+skillmgr plan
+skillmgr sync --apply
+skillmgr doctor
+```
+
+完成后，`~/.codex/skills/hello` 会指向 `~/MySkills/owned/hello`。以后修改原件，无需复制多份文件。
+
+> `sync --apply` 只处理 SkillManager 已登记且当前状态可验证的入口。请始终先阅读 `plan` 输出。
+
+### 日常使用
+
+| 目标 | 命令 |
+| --- | --- |
+| 查看已登记 Skill 和批准的 Agent | `skillmgr list` |
+| 查看某个 Skill 的来源与归属 | `skillmgr explain <skill>` |
+| 修改 Agent 白名单 | `skillmgr target set <skill> codex,claude` |
+| 分发给所有兼容且已批准的 Agent | `skillmgr target all <skill>` |
+| 从白名单移除一个 Agent | `skillmgr target remove <skill> <agent>` |
+| 预览同步变更 | `skillmgr plan` |
+| 应用同步变更 | `skillmgr sync --apply` |
+| 检查配置、链接与未完成事务 | `skillmgr doctor` |
+| 审计现有 Skill | `skillmgr audit` |
+
+所有命令默认使用 `~/MySkills`。如需其他位置，追加 `--library /path/to/library`。
+
+#### 使用第三方 Git Skill
+
+```sh
+skillmgr source add https://github.com/OWNER/REPO --name example
+skillmgr skill add example skills/example-skill --agents codex,claude
+skillmgr plan
+skillmgr sync --apply
+```
+
+更新第三方来源：
+
+```sh
+skillmgr update example
+```
+
+> 固定 commit 只能保证版本可复现，不能证明第三方 Skill 安全。分发前请审查对应 commit 中的 `SKILL.md`、脚本和资源。
+
+### 迁移已有 Skill
+
+先审计，再生成迁移计划：
+
+```sh
+skillmgr audit
+skillmgr migrate plan --output migration.json
+```
+
+生成的候选项默认都是 `"action": "review"`，不会直接执行。确认所有权后，可在计划中选择：
+
+- `adopt`：把个人 Skill 原件迁入 MySkills；
+- `relink`：把旧入口改为已登记的 MySkills Skill；
+- `retire`：仅在已有同名 System/Plugin 替代项时退役旧版本；
+- `prune`：仅清理目标不存在的断链；
+- `split`：拆分指向整套旧 Skill 目录的别名。
+
+执行、回滚或确认完成：
+
+```sh
+skillmgr migrate apply migration.json
+skillmgr migrate rollback TRANSACTION_ID
+skillmgr migrate finalize TRANSACTION_ID
+```
+
+`finalize` 会重新验证原件和软链接，然后删除该事务的备份并关闭回滚窗口。
+
+### 配置与安全边界
+
+| 路径 | 用途 |
+| --- | --- |
+| `~/MySkills/skills.toml` | Skill 来源、路径、白名单和能力要求 |
+| `~/MySkills/skills.lock` | 第三方 Git commit 锁定 |
+| `~/.config/skillmanager/agents.toml` | 本机 Agent 路径、批准状态和能力 |
+| `~/MySkills/.skillmanager/` | 受管链接状态、事务日志和迁移备份 |
+
+- Skill、source 和 Agent 名称必须是单层路径名。
+- SkillManager 不修改项目级 Skill，不安装或升级 Plugin，也不移动 Agent System/Runtime Skill。
+- 真实目录、未知软链接、被手工改向的链接和库外目标都会报告冲突，不会被覆盖。
+- 如果 `doctor` 报告未完成事务，请保留日志和备份，不要手工移动相关入口。
+
+### 从源码开发
 
 ```sh
 git clone https://github.com/Niall-Young/Skill-manager.git
 cd Skill-manager
-pnpm install
-pnpm build
-node dist/cli.js --help
-```
-
-构建后的 npm binary 名为 `skillmgr`。在仓库内可用 `node dist/cli.js` 执行相同命令。
-
-#### 初始化专门仓库
-
-```sh
-node dist/cli.js library init ~/MySkills
-node dist/cli.js agent detect --json
-node dist/cli.js agent approve codex
-node dist/cli.js agent approve claude
-node dist/cli.js agent approve qodercn
-node dist/cli.js agent approve kimi
-```
-
-`agent detect` 是只读操作；只有 `agent approve` 才会把 Agent 写入本机的 `~/.config/skillmanager/agents.toml`。
-
-### 使用方法
-
-`~/MySkills/skills.toml` 是 Skill 与白名单的真源：
-
-```toml
-version = 1
-
-[source.own]
-kind = "owned"
-path = "owned"
-
-[skill.i-am-codex]
-from = "own"
-path = "i-am-codex"
-agents = ["codex"]
-
-[skill.expert]
-from = "own"
-path = "expert"
-agents = ["*"]
-```
-
-将 Skill 放入 `~/MySkills/owned/<name>/SKILL.md` 后，先预览再同步：
-
-```sh
-node dist/cli.js plan --library ~/MySkills
-node dist/cli.js sync --library ~/MySkills --apply
-```
-
-当已登记 Skill 的来源路径发生变化时，`plan` 会把仍指向旧目标且与受管记录一致的入口显示为 `retarget`。请先检查计划，再执行 `sync --apply`；未受管链接、已被手工改向的链接，以及旧目标位于 SkillLibrary 外的链接仍会报告冲突，不会被覆盖。
-
-常用白名单操作：
-
-```sh
-node dist/cli.js target set expert codex,claude --library ~/MySkills
-node dist/cli.js target all expert --library ~/MySkills
-node dist/cli.js target remove expert claude --library ~/MySkills
-```
-
-项目仍拥有正文、Codex 只保留入口的 Skill，需要显式登记：
-
-```sh
-node dist/cli.js external trust codex project-skill --owner PROJECT_NAME --library ~/MySkills
-node dist/cli.js external untrust codex project-skill --library ~/MySkills
-```
-
-添加第三方 Git 来源和其中的 Skill：
-
-```sh
-node dist/cli.js source add https://github.com/OWNER/REPO --name example --library ~/MySkills
-node dist/cli.js skill add example skills/example-skill --agents codex,claude --library ~/MySkills
-```
-
-> 第三方 Skill 是 Agent 会读取和执行的指令，不因为被 SkillManager 固定了 commit 就自动可信。添加或更新来源后，请先审查对应 commit 的 `SKILL.md`、脚本和资源，再把它分发给 Agent。
-
-安全审计与迁移：
-
-```sh
-node dist/cli.js audit --library ~/MySkills
-node dist/cli.js migrate plan --library ~/MySkills --output migration.json
-```
-
-生成的迁移候选默认都是 `"action": "review"`。确认来源后选择动作：`adopt` 把个人原件迁入 MySkills；`relink` 把旧入口换到已登记的同名 MySkills Skill；`retire` 仅用于已有同名 Codex System/Plugin 替代项的旧版本；`prune` 仅清理目标不存在的断链。`adopt` 和 `relink` 都必须填写 `agents`。
-
-```sh
-node dist/cli.js migrate apply migration.json --library ~/MySkills
-node dist/cli.js migrate rollback TRANSACTION_ID --library ~/MySkills
-node dist/cli.js migrate finalize TRANSACTION_ID --library ~/MySkills
-```
-
-`finalize` 会再次验证迁入正文和软链接，再删除该事务的备份并关闭回滚窗口。
-
-### 配置与边界
-
-- `~/MySkills/skills.toml`：Skill 来源、路径、白名单和能力要求。
-- `~/MySkills/skills.lock`：第三方 Git commit。
-- `~/.config/skillmanager/agents.toml`：本机 Agent 的独立全局目录、批准状态和能力。
-- `~/MySkills/.skillmanager/`：受管链接、事务与迁移备份，不进入 Git。
-- SkillManager 不修改项目级 Skill，不安装或升级 Plugin，也不移动 Agent System/Runtime Skill。
-- 某 Agent 的整个 Skill 目录若是软链接，`doctor` 和迁移计划会报告；只有明确把对应 `rootAliases[].action` 改为 `split` 后，迁移才会拆分它。
-- Skill、source 和 Agent 名称必须是单层路径名；所有受管入口在执行前都会再次验证其所属目录和当前目标。
-- 如果 `doctor` 报告未完成事务，请不要手工移动相关入口；先保留事务日志和备份，再提交安全报告或 Issue。
-
-### 开发与验证
-
-```sh
+pnpm install --frozen-lockfile
 pnpm check
-pnpm pack --dry-run
+npm pack --dry-run
 ```
 
 测试使用临时 HOME、临时 SkillLibrary 和本地 Git fixture，不接触真实 Agent 目录。
@@ -174,7 +200,7 @@ pnpm pack --dry-run
 ### 贡献、安全与许可证
 
 - 贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-- 安全漏洞请按 [SECURITY.md](SECURITY.md) 私下报告，不要创建公开 Issue。
+- 安全漏洞请通过 [Private Vulnerability Reporting](https://github.com/Niall-Young/Skill-manager/security/advisories/new) 私下报告。
 - 本项目采用 [MIT License](LICENSE)。
 
 [English](#english) · [返回顶部](#skillmanager)
@@ -186,170 +212,190 @@ pnpm pack --dry-run
 
 ### Overview
 
-SkillManager separates Skill originals from Agent discovery entries. Originals live in a dedicated `MySkills` repository, while global Skill directories for Codex, Claude Code, Qoder CN, Kimi Code, Gemini, and other agents receive only allowlisted symlinks. Project-local, Plugin-owned, and Agent System Skills stay outside this distribution flow.
+When you use multiple AI coding tools, the same Skill often ends up copied across several global directories. Updating one copy leaves the others stale, and it becomes difficult to tell which agents are allowed to use it.
 
-The current release is a local-first CLI v0.1. It never migrates existing global Skills automatically: migration starts with a plan, and each selected Skill must be changed to `adopt`, `relink`, `retire`, or `prune`, or a whole-directory alias must be changed to `split`.
+SkillManager follows one simple rule:
 
-The ownership rule is intentionally simple:
+```text
+~/MySkills (single source of truth)
+        │
+        ├── skills.toml (distribution allowlists)
+        │
+        └── SkillManager
+              ├──→ ~/.codex/skills/<skill>
+              ├──→ ~/.claude/skills/<skill>
+              └──→ Skill directories of other approved agents
+```
 
-| Skill type | Where its original belongs | SkillManager behavior |
-| --- | --- | --- |
-| Personal and portable across Agents | Dedicated `~/MySkills` library | Distribute allowlisted symlinks |
-| Owned by one project | That project's own Skill directory | Never migrate it; audit only explicitly trusted links |
-| Supplied by a Plugin, System, or Runtime | Its Agent ecosystem's managed location | Detect read-only; never copy, migrate, or link it |
+Agent directories contain symlinks to the originals. You maintain one copy of each Skill and explicitly decide where it can be distributed.
 
-For example, “I am Codex” can use `agents = ["codex"]`, while a portable “expert” Skill can use `agents = ["*"]`. The wildcard still targets only approved Agents that satisfy the Skill's capability requirements.
+The current release is a local CLI, `v0.1.0`. It never takes over existing Skills automatically and never overwrites real directories or unknown symlinks. Every migration starts with a plan and requires an explicit action choice.
 
 ### Features
 
-- Initialize a dedicated `MySkills` Git repository without treating any Agent directory as a source of truth.
-- Assign each Skill an Agent allowlist in `skills.toml`; `["*"]` includes only approved, capability-compatible Agents.
-- Check out third-party Skills from local or remote Git repositories and pin their commits in `skills.lock`.
-- Detect Codex System Skills and Skills from currently enabled Plugins as read-only inventory.
-- Recognize provider-installed and Aily Runtime Skills automatically, with explicit trust records for project-owned links.
-- Create, retarget, and remove per-Skill links with write-ahead transaction journals. Failures are rolled back and interrupted operations are reported by `doctor`. Retargeting is allowed only when the old target still matches managed state and remains inside SkillLibrary; real directories, unknown links, and whole-directory aliases become conflicts.
-- Audit legacy Skills, adopt, relink, retire, roll back, and finalize their migrations.
-- Include a lightweight natural-language entrypoint at [`skills/skillmanager`](skills/skillmanager/SKILL.md).
+- **One source of truth**: keep personal Skills in a dedicated `~/MySkills` Git repository.
+- **Explicit access**: assign every Skill an Agent allowlist; even `["*"]` targets only approved, capability-compatible agents.
+- **Safe synchronization**: preview with `plan`, apply with `sync --apply`, and recover failed writes through transaction records.
+- **Third-party sources**: use local or remote Git repositories with commits pinned in `skills.lock`.
+- **Legacy migration**: audit old directories, adopt or relink Skills, retire replacements, roll back, and remove backups after verification.
+- **Ownership-aware**: detect project, Plugin, System, and Runtime Skills without moving them.
+
+Built-in detection covers Codex, Claude Code, Qoder CN, Kimi Code, Gemini, Kiro, Qwen, Roo Code, Continue, CodeBuddy, WorkBuddy, and AiderDesk.
 
 ### Quick Start
 
-#### Prerequisites
+#### 1. Install
 
-- Node.js 22 or later
-- pnpm 11
-- Git
-- macOS or another system with directory symlink support
-
-#### Install from npm
-
-After the first npm release of `skillmanager`, install it globally and use the `skillmgr` command:
+Requires Node.js 22+, Git, and an operating system with directory symlink support.
 
 ```sh
-npm install --global skillmanager
+npm install --global @niallayoung/skillmanager
 skillmgr --help
 ```
 
-#### Install and build from source
+If your npm mirror has not synchronized the latest release yet, temporarily use the official registry:
+
+```sh
+npm install --global @niallayoung/skillmanager --registry=https://registry.npmjs.org/
+```
+
+#### 2. Initialize SkillLibrary
+
+```sh
+skillmgr library init ~/MySkills
+skillmgr agent detect --json
+skillmgr agent approve codex
+```
+
+Replace `codex` on the last line with an agent you detected and want to approve. `agent detect` is read-only; only `agent approve` writes approval data to `~/.config/skillmanager/agents.toml`.
+
+#### 3. Add your first Skill
+
+```sh
+mkdir -p ~/MySkills/owned/hello
+```
+
+Create `~/MySkills/owned/hello/SKILL.md`:
+
+```markdown
+---
+name: hello
+description: Greet the user with one friendly sentence
+---
+
+# Hello
+
+Greet the user in concise, natural language.
+```
+
+Register it and allow only Codex to use it:
+
+```sh
+skillmgr skill add own hello --name hello --agents codex
+```
+
+#### 4. Preview and sync
+
+```sh
+skillmgr plan
+skillmgr sync --apply
+skillmgr doctor
+```
+
+After synchronization, `~/.codex/skills/hello` points to `~/MySkills/owned/hello`. Future edits affect the original, so there are no copies to keep in sync.
+
+> `sync --apply` touches only registered entries whose current state SkillManager can verify. Always review the `plan` output first.
+
+### Everyday Usage
+
+| Goal | Command |
+| --- | --- |
+| List registered Skills and approved agents | `skillmgr list` |
+| Explain a Skill's source and ownership | `skillmgr explain <skill>` |
+| Set an Agent allowlist | `skillmgr target set <skill> codex,claude` |
+| Target every compatible approved agent | `skillmgr target all <skill>` |
+| Remove one Agent from an allowlist | `skillmgr target remove <skill> <agent>` |
+| Preview synchronization | `skillmgr plan` |
+| Apply synchronization | `skillmgr sync --apply` |
+| Check configuration, links, and incomplete transactions | `skillmgr doctor` |
+| Audit existing Skills | `skillmgr audit` |
+
+Commands use `~/MySkills` by default. Append `--library /path/to/library` to use another location.
+
+#### Use a third-party Git Skill
+
+```sh
+skillmgr source add https://github.com/OWNER/REPO --name example
+skillmgr skill add example skills/example-skill --agents codex,claude
+skillmgr plan
+skillmgr sync --apply
+```
+
+Update a third-party source with:
+
+```sh
+skillmgr update example
+```
+
+> Pinning a commit makes a version reproducible; it does not make a third-party Skill safe. Review that commit's `SKILL.md`, scripts, and assets before distributing it.
+
+### Migrate Existing Skills
+
+Audit first, then create a migration plan:
+
+```sh
+skillmgr audit
+skillmgr migrate plan --output migration.json
+```
+
+Every candidate starts with `"action": "review"` and is not applied automatically. After confirming ownership, choose:
+
+- `adopt`: move a personal Skill original into MySkills;
+- `relink`: redirect a legacy entry to a registered MySkills Skill;
+- `retire`: retire an old copy only when a same-name System/Plugin replacement exists;
+- `prune`: remove only a symlink whose target no longer exists;
+- `split`: split an alias that points to an entire legacy Skill directory.
+
+Apply, roll back, or finalize the migration:
+
+```sh
+skillmgr migrate apply migration.json
+skillmgr migrate rollback TRANSACTION_ID
+skillmgr migrate finalize TRANSACTION_ID
+```
+
+`finalize` revalidates originals and symlinks, removes the transaction backup, and closes the rollback window.
+
+### Configuration and Safety Boundaries
+
+| Path | Purpose |
+| --- | --- |
+| `~/MySkills/skills.toml` | Skill sources, paths, allowlists, and capability requirements |
+| `~/MySkills/skills.lock` | Pinned third-party Git commits |
+| `~/.config/skillmanager/agents.toml` | Machine-local Agent paths, approvals, and capabilities |
+| `~/MySkills/.skillmanager/` | Managed-link state, transaction journals, and migration backups |
+
+- Skill, source, and Agent names must be single path segments.
+- SkillManager does not modify project-local Skills, install or update Plugins, or move Agent System/Runtime Skills.
+- Real directories, unknown symlinks, manually redirected links, and targets outside the library are reported as conflicts and never overwritten.
+- If `doctor` reports an incomplete transaction, preserve its journal and backup instead of moving affected entries manually.
+
+### Develop from Source
 
 ```sh
 git clone https://github.com/Niall-Young/Skill-manager.git
 cd Skill-manager
-pnpm install
-pnpm build
-node dist/cli.js --help
-```
-
-The built npm binary is named `skillmgr`. Inside this repository, `node dist/cli.js` runs the same commands.
-
-#### Initialize the dedicated library
-
-```sh
-node dist/cli.js library init ~/MySkills
-node dist/cli.js agent detect --json
-node dist/cli.js agent approve codex
-node dist/cli.js agent approve claude
-node dist/cli.js agent approve qodercn
-node dist/cli.js agent approve kimi
-```
-
-`agent detect` is read-only. Only `agent approve` writes the Agent to `~/.config/skillmanager/agents.toml`.
-
-### Usage
-
-`~/MySkills/skills.toml` is the source of truth for Skills and allowlists:
-
-```toml
-version = 1
-
-[source.own]
-kind = "owned"
-path = "owned"
-
-[skill.i-am-codex]
-from = "own"
-path = "i-am-codex"
-agents = ["codex"]
-
-[skill.expert]
-from = "own"
-path = "expert"
-agents = ["*"]
-```
-
-After adding a Skill at `~/MySkills/owned/<name>/SKILL.md`, preview and then apply distribution:
-
-```sh
-node dist/cli.js plan --library ~/MySkills
-node dist/cli.js sync --library ~/MySkills --apply
-```
-
-When a registered Skill's source path changes, `plan` reports an existing entry as `retarget` only if it still points to the recorded managed target. Review the plan before running `sync --apply`. Unmanaged links, manually redirected links, and links whose old target is outside SkillLibrary remain conflicts and are never overwritten.
-
-Common allowlist operations:
-
-```sh
-node dist/cli.js target set expert codex,claude --library ~/MySkills
-node dist/cli.js target all expert --library ~/MySkills
-node dist/cli.js target remove expert claude --library ~/MySkills
-```
-
-Explicitly register a project-owned Skill whose source stays with its project:
-
-```sh
-node dist/cli.js external trust codex project-skill --owner PROJECT_NAME --library ~/MySkills
-node dist/cli.js external untrust codex project-skill --library ~/MySkills
-```
-
-Add a third-party Git source and one of its Skills:
-
-```sh
-node dist/cli.js source add https://github.com/OWNER/REPO --name example --library ~/MySkills
-node dist/cli.js skill add example skills/example-skill --agents codex,claude --library ~/MySkills
-```
-
-> A third-party Skill contains instructions that an Agent may read and execute. Pinning a commit does not make it trusted. After adding or updating a source, review that commit's `SKILL.md`, scripts, and assets before distributing it to any Agent.
-
-Safe audit and migration:
-
-```sh
-node dist/cli.js audit --library ~/MySkills
-node dist/cli.js migrate plan --library ~/MySkills --output migration.json
-```
-
-Every generated candidate starts with `"action": "review"`. Use `adopt` to move a personal original into MySkills, `relink` to replace a legacy entry with an already registered MySkills Skill, `retire` only when a same-name Codex System/Plugin replacement is present, or `prune` only for a symlink whose target is missing. Both `adopt` and `relink` require `agents`.
-
-```sh
-node dist/cli.js migrate apply migration.json --library ~/MySkills
-node dist/cli.js migrate rollback TRANSACTION_ID --library ~/MySkills
-node dist/cli.js migrate finalize TRANSACTION_ID --library ~/MySkills
-```
-
-`finalize` revalidates migrated originals and links, removes that transaction's backup, and closes the rollback window.
-
-### Configuration and Boundaries
-
-- `~/MySkills/skills.toml`: Skill sources, paths, allowlists, and capability requirements.
-- `~/MySkills/skills.lock`: pinned third-party Git commits.
-- `~/.config/skillmanager/agents.toml`: machine-local Agent directories, approvals, and capabilities.
-- `~/MySkills/.skillmanager/`: managed-link state, transactions, and migration backups; excluded from Git.
-- SkillManager does not modify project-local Skills, install or update Plugins, or move Agent System/Runtime Skills.
-- If an Agent's entire Skill directory is a symlink, `doctor` and the migration plan report it. Migration splits it only after the matching `rootAliases[].action` is explicitly changed to `split`.
-- Skill, source, and Agent names must each be a single path segment. Every managed entry is revalidated against its owning directory and current target before mutation.
-- If `doctor` reports an incomplete transaction, do not move the affected entries manually. Preserve the journal and backup, then file a security report or issue.
-
-### Development and Verification
-
-```sh
+pnpm install --frozen-lockfile
 pnpm check
-pnpm pack --dry-run
+npm pack --dry-run
 ```
 
-Tests use a temporary HOME, temporary SkillLibrary, and local Git fixtures; they never touch live Agent directories.
+Tests use a temporary HOME, a temporary SkillLibrary, and local Git fixtures; they never touch live Agent directories.
 
 ### Contributing, Security, and License
 
-- See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes.
-- Report vulnerabilities privately through [SECURITY.md](SECURITY.md), not a public issue.
+- See [CONTRIBUTING.md](CONTRIBUTING.md) before contributing.
+- Report vulnerabilities privately through [Private Vulnerability Reporting](https://github.com/Niall-Young/Skill-manager/security/advisories/new).
 - This project is licensed under the [MIT License](LICENSE).
 
 [中文](#中文) · [Back to top](#skillmanager)
