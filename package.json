@@ -42,7 +42,7 @@
     "smol-toml": "^1.4.2"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.4.0",
     "typescript": "^5.9.0"
   },
   "packageManager": "pnpm@11.1.2",
