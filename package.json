@@ -43,7 +43,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
-    "typescript": "^5.9.0"
+    "typescript": "^7.0.2"
   },
   "packageManager": "pnpm@11.1.2",
   "publishConfig": {
