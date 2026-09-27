@@ -10,7 +10,7 @@ importers:
     dependencies:
       smol-toml:
         specifier: ^1.4.2
-        version: 1.8.0
+        version: 1.9.0
     devDependencies:
       '@types/node':
         specifier: ^22.20.1
@@ -144,8 +144,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  smol-toml@1.8.0:
-    resolution: {integrity: sha512-kCZr2V3ch9i00x8zXRhjUNVcjG9ijES5dDudkXvUVCT5QlJNQWElSJdZqyPemffHoLNUYwOcou0Fy+ojN0uHSQ==}
+  smol-toml@1.9.0:
+    resolution: {integrity: sha512-hpd+HLON7HdZXqYchMM/+LaTTbdK0AU3NngIJ4KVyWbY9bfQqdL9cD+4yf6dUoU2Ap4VsU0JkQi6FxAI1B2mXQ==}
     engines: {node: '>= 18'}
 
   typescript@7.0.2:
@@ -222,7 +222,7 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  smol-toml@1.8.0: {}
+  smol-toml@1.9.0: {}
 
   typescript@7.0.2:
     optionalDependencies:
